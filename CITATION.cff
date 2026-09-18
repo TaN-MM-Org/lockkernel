@@ -1,0 +1,27 @@
+cff-version: 1.2.0
+message: "If this software is useful in your work, please cite it."
+title: "lockkernel: locking kernel universality in synchronization transitions"
+abstract: >-
+  Exact thresholds, exponents and amplitudes of synchronization
+  transitions from the locking kernel, and fits of measured
+  synchronization branches with error bars and refusals.
+type: software
+authors:
+  - family-names: Mahim
+    given-names: Tanvir M.
+    orcid: "https://orcid.org/0000-0002-4550-3248"
+    affiliation: "Department of Electrical and Electronic Engineering, BRAC University, Dhaka, Bangladesh"
+  - family-names: Rahman
+    given-names: M. Mosaddequr
+    affiliation: "Department of Electrical and Electronic Engineering, BRAC University, Dhaka, Bangladesh"
+  - family-names: Mohsin
+    given-names: Abu S. M.
+    affiliation: "Department of Electrical and Electronic Engineering, BRAC University, Dhaka, Bangladesh"
+version: 1.1.0
+date-released: 2026-09-18
+license: Apache-2.0
+repository-code: "https://github.com/TaN-MM-Org/lockkernel"
+identifiers:
+  - type: doi
+    value: 10.5281/zenodo.22696369
+    description: "Concept DOI of the source research repository (locking-kernel-universality)"
