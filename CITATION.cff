@@ -23,5 +23,8 @@ license: Apache-2.0
 repository-code: "https://github.com/TaN-MM-Org/lockkernel"
 identifiers:
   - type: doi
+    value: 10.5281/zenodo.22829483
+    description: "Concept DOI for all versions of this package; resolves to the latest release"
+  - type: doi
     value: 10.5281/zenodo.22696369
     description: "Concept DOI of the source research repository (locking-kernel-universality)"

@@ -1,6 +1,6 @@
 # lockkernel
 
-[![PyPI](https://img.shields.io/pypi/v/lockkernel.svg)](https://pypi.org/project/lockkernel/) [![tests](https://github.com/TaN-MM-Org/lockkernel/actions/workflows/ci.yml/badge.svg)](https://github.com/TaN-MM-Org/lockkernel/actions)
+[![PyPI](https://img.shields.io/pypi/v/lockkernel.svg)](https://pypi.org/project/lockkernel/) [![DOI](https://img.shields.io/badge/DOI-10.5281%2Fzenodo.22829483-blue)](https://doi.org/10.5281/zenodo.22829483) [![tests](https://github.com/TaN-MM-Org/lockkernel/actions/workflows/ci.yml/badge.svg)](https://github.com/TaN-MM-Org/lockkernel/actions)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
 A population of oscillators with spread frequencies begins to
@@ -174,4 +174,7 @@ bug, not user error.
 
 ## License
 
-Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE). Every
+release of this package is archived on Zenodo under the concept DOI
+[10.5281/zenodo.22829483](https://doi.org/10.5281/zenodo.22829483),
+which always resolves to the latest version.
