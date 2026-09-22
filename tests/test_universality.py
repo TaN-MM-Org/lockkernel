@@ -64,11 +64,12 @@ def test_general_amplitude(s, tol):
 def test_general_amplitude_reduces_to_the_s2_form():
     """At s = 2 the general amplitude is pi p(0)^2 / c.
 
-    The two agree to the accuracy of the less accurate one, which is the c
-    based form: it evaluates p(0) - p(delta) near the origin, a cancellation,
-    where the general form integrates p' instead and has none.  On a Gaussian
-    line the general form reproduces pi/2 to one part in 1e12 and the c based
-    form to two parts in 1e7, so the tolerance here is set by the latter.
+    The c based form evaluates p(0) - p(delta) near the origin, a
+    cancellation, where the general form integrates p' instead and has none.
+    Before 1.1.1 that cancellation limited the c based form to about two
+    parts in 1e7 on a Gaussian line at this precision, which is what set the
+    tolerance here; since 1.1.1 it carries extra digits and the two agree far
+    more closely.
     """
     for line in (L.gaussian(1.0), L.lorentzian(1.0)):
         a1 = P.amplitude_general(line, K.conservative())

@@ -128,5 +128,5 @@ def test_metadata_and_no_matplotlib():
          "print('matplotlib' in sys.modules)"],
         capture_output=True, text=True, check=True)
     version, has_mpl = out.stdout.split()
-    assert version == "1.1.0"
+    assert version == "1.1.1"
     assert has_mpl == "False"

@@ -57,6 +57,21 @@ def test_amplitude_closed_forms(line, want):
     assert abs(P.amplitude(line) - want) / want < mp.mpf("1e-9")
 
 
+def test_amplitude_at_default_precision():
+    """The amplitude must not depend on the caller raising mp.dps.
+
+    Before 1.1.1 the c integral lost about 40 digits to a cancellation near
+    the origin, so at mpmath's default 15 digits amplitude(lorentzian())
+    returned about 5e-4 instead of 1, and a Lorentzian 1000 wide lost digits
+    even at 30.
+    """
+    with mp.workdps(15):
+        for line, want in [(L.lorentzian(1.0), mp.mpf(1)),
+                           (L.gaussian(1.0), mp.pi / 2),
+                           (L.lorentzian(1000.0), mp.mpf(1))]:
+            assert abs(P.amplitude(line) - want) / want < mp.mpf("1e-12")
+
+
 @pytest.mark.parametrize("line", [L.lorentzian(1.0), L.gaussian(1.0),
                                   L.student_t(3.0, 0.5), L.box(0.5)])
 def test_c_integral_matches_slope(line):
