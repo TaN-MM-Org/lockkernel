@@ -5,6 +5,67 @@ form, an exact identity, high-precision quadrature against
 independent closed forms, or seeded simulation; the release notes on
 GitHub carry the full anchor lists.
 
+## v1.1.1 - 2026-09-22
+
+### Fixed
+
+- `parametric.c_coefficient`, and therefore `parametric.amplitude`,
+  lost about 40 digits to the cancellation p(delta) - p(0) near the
+  lower end of its integral. At mpmath's default precision (15 digits)
+  `amplitude(lorentzian())` returned about 5e-4 instead of 1, and
+  `amplitude(gaussian())` about 3e-4 instead of pi/2; at 20 digits the
+  Lorentzian value was off by about 0.16 %, and a Lorentzian of width
+  1000 was off by about 1e-9 even at 30 digits. The tests ran at 30
+  digits on unit-width lines, where the error is about 1e-12, so they
+  did not see it. The integral now runs with 25 extra digits and its
+  lower end is placed at 1e-20 line widths instead of 1e-20 absolute.
+  Anyone who called `c_coefficient` or `amplitude` below about 30
+  digits should re-run those numbers. Skipping the first 1e-20 line
+  widths still limits both to about 20 significant digits, however
+  high the precision is set (as in 1.1.0 for unit-width lines); this
+  is now stated in the docstring and the README.
+
+### Tests
+
+- New `test_amplitude_at_default_precision`: at 15 digits, the
+  amplitude of the Lorentzian (widths 1 and 1000) and Gaussian lines
+  matches 1 and pi/2 to a relative 1e-12. It fails on 1.1.0.
+- CI now runs Python 3.10 too (the classifiers claimed 3.9-3.14, but
+  3.10 was missing from the matrix), and a new `oldest-dependencies`
+  job runs the suite on Python 3.10 with NumPy 1.22.0, SciPy 1.8.0 and
+  mpmath 1.2.1 (PyPI has no mpmath 1.2.0), the lowest versions
+  pyproject.toml allows. 65 tests.
+- The source distribution now ships `tests/conftest.py` (new
+  `MANIFEST.in`). The 1.1.0 sdist left it out, and without it the
+  test files overwrite each other's mpmath precision: run in one go
+  from the 1.1.0 sdist (leaving out the six slowest tests), 11 tests
+  failed. The repository at v1.1.0, which CI runs, had the file.
+
+### Changed
+
+- README rewritten in plainer language, with worked examples whose
+  printed output is checked, a list of every refusal, and the test
+  tolerances as the tests actually assert them. Corrections to the
+  1.1.0 README: the coefficient c is checked to a relative 1e-9, not
+  1e-11; only the Lorentzian closed form is checked to 1e-28 over six
+  decades (the Kuramoto one to 1e-26 over four); `class_exact` is not
+  covered by any test; the claim that exponents come out "at tens of
+  digits" is not supported by any test (they are checked to a relative
+  1e-6 to 5e-3, depending on s); the general amplitude is checked at
+  s = 1.8, 2.0 and 2.2, not along the whole line; `points_for_beta(0.01)`
+  targets an absolute error of 0.01 on beta, not 1 %; and the example
+  passed `extract_beta` exponents in the order that makes its last
+  entry the one farthest from the onset.
+
+### Corrections to earlier entries
+
+- v1.1.0 says the noisy fit lands "within its own reported error
+  bars"; the test allows four error bars. It also says "Python
+  3.9-3.14 CI", but 3.10 was not in the CI matrix.
+- The note at the top ("Every claim added in any release is pinned by
+  a test") does not hold for `fold_interval`, `bimodal_gaussian`,
+  `class_exact`, `physicality` and `valid_window`, which have no test.
+
 ## v1.1.0 - 2026-09-18
 
 First release under this organization: the maintained distribution

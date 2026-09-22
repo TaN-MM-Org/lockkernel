@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lockkernel"
-version = "1.1.0"
+version = "1.1.1"
 description = "Locking kernel universality: exact thresholds and exponents of synchronization transitions, and fits of measured branches with error bars and refusals"
 readme = "README.md"
 requires-python = ">=3.9"

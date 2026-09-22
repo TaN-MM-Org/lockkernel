@@ -17,8 +17,8 @@ authors:
   - family-names: Mohsin
     given-names: Abu S. M.
     affiliation: "Department of Electrical and Electronic Engineering, BRAC University, Dhaka, Bangladesh"
-version: 1.1.0
-date-released: 2026-09-18
+version: 1.1.1
+date-released: 2026-09-22
 license: Apache-2.0
 repository-code: "https://github.com/TaN-MM-Org/lockkernel"
 identifiers:
