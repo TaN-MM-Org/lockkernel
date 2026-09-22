@@ -153,18 +153,29 @@ def c_coefficient(line: LineShape) -> mp.mpf:
     transition.  The integrand has a REMOVABLE singularity at the origin, its
     limit being p''(0)/2, so the quadrature must not evaluate it there; the
     range is split away from zero and the integrand is even.
+
+    Near the lower end of the range, p(delta) - p(0) is a cancellation that
+    loses about 40 digits, so the quadrature runs with 25 digits more than
+    the working precision and the lower end is placed at 1e-20 line widths.
+    Without this the result was wrong at mpmath's default precision (15
+    digits): `amplitude(lorentzian())` came out near 5e-4 instead of 1.
+    Skipping the first 1e-20 line widths leaves out a piece of relative
+    size about 1e-20, so the result is good to about 20 significant digits
+    at most, however high the working precision is set.
     """
-    p0 = line.p0()
-    sc = mp.mpf(line.scale)
+    with mp.extradps(25):
+        p0 = line.p0()
+        sc = mp.mpf(line.scale)
 
-    def f(d):
-        if d == 0:
-            return mp.diff(line.pdf, mp.mpf(0), 2) / 2
-        return (line.pdf(d) - p0) / d ** 2
+        def f(d):
+            if d == 0:
+                return mp.diff(line.pdf, mp.mpf(0), 2) / 2
+            return (line.pdf(d) - p0) / d ** 2
 
-    val = 2 * mp.quad(f, [mp.mpf(10) ** -20, sc * mp.mpf("1e-3"), sc,
-                          10 * sc, 100 * sc, INF])
-    return -val / mp.pi
+        val = 2 * mp.quad(f, [sc * mp.mpf(10) ** -20, sc * mp.mpf("1e-3"), sc,
+                              10 * sc, 100 * sc, INF])
+        out = -val / mp.pi
+    return +out
 
 
 def amplitude(line: LineShape) -> mp.mpf:

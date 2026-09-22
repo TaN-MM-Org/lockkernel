@@ -7,7 +7,7 @@ it fits a MEASURED synchronization branch for the threshold and the exponent,
 with error bars and refusals, and reads the kernel tail back off the exponent
 through the same dictionary the theory half proves.
 """
-__version__ = "1.1.0"
+__version__ = "1.1.1"
 
 from . import kernels, lineshapes, measured, parametric  # noqa: F401
 from .measured import (BranchFit, beta_relative_sigma,  # noqa: F401
