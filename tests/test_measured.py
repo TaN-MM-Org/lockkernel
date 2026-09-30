@@ -10,7 +10,8 @@ import numpy as np
 import pytest
 
 from lockkernel import (beta_relative_sigma, fit_branch,
-                        kernel_tail_from_beta, points_for_beta)
+                        kernel_tail_from_beta, plan_fit, points_for_beta,
+                        points_for_fit)
 from lockkernel.kernels import conservative, power_tail, predicted_beta
 from lockkernel.lineshapes import lorentzian
 from lockkernel.parametric import sweep, threshold
@@ -128,5 +129,121 @@ def test_metadata_and_no_matplotlib():
          "print('matplotlib' in sys.modules)"],
         capture_output=True, text=True, check=True)
     version, has_mpl = out.stdout.split()
-    assert version == "1.1.1"
+    assert version == "1.2.0"
     assert has_mpl == "False"
+
+
+# ---------------------------------------------------------------------------
+# New in 1.2.0: exact error bars, and planning with the threshold fitted
+# ---------------------------------------------------------------------------
+
+CHI_C, BETA, AMP, SLOG = 0.5, 2.0 / 3.0, 0.65, 0.01
+
+
+def _power_law(eps_min, eps_max, n):
+    eps = np.geomspace(eps_min, eps_max, n)
+    return CHI_C * (1.0 + eps), AMP * eps ** BETA
+
+
+def _mpmath_sigmas(chi, sigma_log):
+    """Asymptotic error bars from derivatives taken by mpmath's numerical
+    differentiation at 30 digits, independent of any hand-written
+    derivative: sigma_log^2 (J^T J)^-1, J = d log R / d(chi_c, beta, log A)
+    at the true parameters."""
+    import mpmath as mp
+    with mp.workdps(30):
+        p0 = [mp.mpf(CHI_C), mp.mpf(BETA), mp.log(AMP)]
+        rows = []
+        for c in chi:
+            c = mp.mpf(c)
+            f = lambda cc, b, la: la + b * mp.log(c / cc - 1)
+            rows.append([mp.diff(f, p0, tuple(int(i == j) for i in range(3)))
+                         for j in range(3)])
+        J = mp.matrix(rows)
+        cov = (J.T * J) ** -1 * mp.mpf(sigma_log) ** 2
+        return [float(mp.sqrt(cov[i, i])) for i in range(3)]
+
+
+def test_fit_error_bars_are_exact_near_threshold():
+    """On noiseless data reaching eps = 1e-7 the fit's error bars equal
+    the asymptotic ones built from mpmath derivatives.  1.1.1 used a
+    finite-difference Jacobian and reported sigma_chi_c 17 % and
+    sigma_beta 2 % too small here."""
+    chi, r = _power_law(1e-7, 1e-2, 12)
+    fit = fit_branch(chi, r, REF, sigma_r=SLOG * r)
+    s_chi, s_beta, s_la = _mpmath_sigmas(chi, SLOG)
+    assert abs(fit.sigma_chi_c / s_chi - 1) < 1e-6
+    assert abs(fit.sigma_beta / s_beta - 1) < 1e-6
+    assert abs(fit.sigma_amplitude / (AMP * s_la) - 1) < 1e-6
+    # and plan_fit, which never sees data, gives the same numbers
+    plan = plan_fit(12, 1e-7, 1e-2, BETA, SLOG)
+    assert abs(plan.sigma_chi_c_rel / (s_chi / CHI_C) - 1) < 1e-6
+    assert abs(plan.sigma_beta / s_beta - 1) < 1e-6
+    assert abs(plan.sigma_amplitude_rel / s_la - 1) < 1e-6
+
+
+@pytest.mark.parametrize("n", [3, 12, 50])
+def test_plan_fit_known_threshold_is_the_closed_form(n):
+    plan = plan_fit(n, 1e-4, 1e-2, BETA, 0.05, fit_threshold=False)
+    assert abs(plan.sigma_beta / beta_relative_sigma(n, 2.0, 0.05) - 1) < 1e-12
+    assert plan.sigma_chi_c_rel == 0.0
+
+
+def test_plan_fit_against_seeded_fits():
+    """300 seeded fits of noisy power laws: the scatter of chi_c, beta and
+    A matches plan_fit, and so does the error bar each fit reports, within
+    12 %; the standard error of a 300-sample scatter is about 4 %.  (With
+    1.1.1 the scatter of chi_c was 1.28 times the median reported
+    sigma_chi_c here.)"""
+    chi, r = _power_law(1e-7, 1e-2, 12)
+    rng = np.random.default_rng(11)
+    got = []
+    for _ in range(300):
+        rn = r * np.exp(rng.normal(0.0, SLOG, r.size))
+        f = fit_branch(chi, rn, "seeded simulation", sigma_r=SLOG * rn)
+        got.append((f.chi_c, f.beta, f.amplitude, f.sigma_chi_c, f.sigma_beta))
+    got = np.array(got)
+    plan = plan_fit(12, 1e-7, 1e-2, BETA, SLOG)
+    scatter = got[:, :3].std(axis=0, ddof=1) / [CHI_C, 1.0, AMP]
+    want = [plan.sigma_chi_c_rel, plan.sigma_beta, plan.sigma_amplitude_rel]
+    for got_s, want_s in zip(scatter, want):
+        assert abs(got_s / want_s - 1) < 0.12
+    assert abs(np.median(got[:, 3]) / CHI_C / scatter[0] - 1) < 0.12
+    assert abs(np.median(got[:, 4]) / scatter[1] - 1) < 0.12
+    # fitting the threshold costs: over these five decades about 1.33x
+    # the known-threshold error bar
+    known = plan_fit(12, 1e-7, 1e-2, BETA, SLOG, fit_threshold=False)
+    assert 1.25 < plan.sigma_beta / known.sigma_beta < 1.4
+
+
+def test_plan_fit_dependence_on_beta():
+    """beta only scales the threshold column of J: sigma_beta and
+    sigma_A are independent of it, sigma_chi_c_rel scales as 1/beta."""
+    ref = plan_fit(12, 1e-5, 1e-2, 1.0, SLOG)
+    for b in (0.3, 0.5, BETA, 1.25):
+        p = plan_fit(12, 1e-5, 1e-2, b, SLOG)
+        assert abs(p.sigma_beta / ref.sigma_beta - 1) < 1e-12
+        assert abs(p.sigma_amplitude_rel / ref.sigma_amplitude_rel - 1) < 1e-12
+        assert abs(p.sigma_chi_c_rel * b / ref.sigma_chi_c_rel - 1) < 1e-12
+
+
+def test_points_for_fit_two_sided_and_monotonic():
+    args = (1e-5, 1e-2, BETA, 0.02)
+    sb = [plan_fit(n, *args).sigma_beta for n in range(6, 401)]
+    assert all(b1 < b0 for b0, b1 in zip(sb, sb[1:]))
+    n, plan = points_for_fit(0.003, *args)
+    assert plan.sigma_beta <= 0.003 < plan_fit(n - 1, *args).sigma_beta
+    assert points_for_fit(1.0, *args)[0] == 6
+    n_known, _ = points_for_fit(0.003, *args, fit_threshold=False)
+    assert n_known < n
+
+
+def test_plan_fit_refusals():
+    with pytest.raises(ValueError, match=">= 6"):
+        plan_fit(5, 1e-4, 1e-2, BETA, SLOG)
+    with pytest.raises(ValueError, match="eps_min < eps_max"):
+        plan_fit(12, 1e-2, 1e-4, BETA, SLOG)
+    with pytest.raises(ValueError, match="positive"):
+        plan_fit(12, 1e-4, 1e-2, BETA, 0.0)
+    with pytest.raises(ValueError, match="positive"):
+        points_for_fit(0.0, 1e-4, 1e-2, BETA, SLOG)

@@ -11,6 +11,7 @@ DPS = {
     "test_universality": 25,
     "test_meanfield": 20,
     "test_cumulant": 15,
+    "test_onset": 15,
 }
 
 
