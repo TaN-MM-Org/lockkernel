@@ -33,7 +33,9 @@ theory half checks the lab half.
 `points_for_beta` plans the measurement before it is taken: the
 closed-form error bar of a log-log slope over a given range of
 reduced coupling, inverted exactly for the number of points a target
-error bar costs.
+error bar costs.  `plan_fit` and `points_for_fit` do the same for the
+three-parameter fit `fit_branch` actually performs, where the
+threshold is fitted too.
 
 Honest limits: the power law is the LEADING near-threshold behavior;
 data taken far above threshold bend away from it and bias beta -- fit
@@ -51,7 +53,8 @@ import numpy as np
 from scipy.optimize import least_squares
 
 __all__ = ["BranchFit", "fit_branch", "kernel_tail_from_beta",
-           "beta_relative_sigma", "points_for_beta"]
+           "beta_relative_sigma", "points_for_beta", "FitPlan", "plan_fit",
+           "points_for_fit"]
 
 
 @dataclass(frozen=True)
@@ -129,6 +132,17 @@ def fit_branch(chi, r, reference, sigma_r=None, min_decade=1.0):
         eps = x / chi_c - 1.0
         return (la + beta * np.log(eps) - ly) / w_log
 
+    def jac(p):
+        # analytic derivatives of resid.  The default finite-difference
+        # Jacobian of least_squares steps chi_c by about 1e-8 relative,
+        # which is not small next to eps = 1e-7: before 1.2.0 the
+        # reported sigma_chi_c came out up to 17 % low that close to
+        # threshold (and sigma_beta about 2 % low).
+        chi_c, beta, la = p
+        eps = x / chi_c - 1.0
+        return np.stack([-beta * x / (chi_c ** 2 * eps), np.log(eps),
+                         np.ones_like(x)], axis=1) / w_log[:, None]
+
     # start: threshold a little under the first point, slope from the
     # outermost pair
     eps0 = x / (0.95 * chi_min) - 1.0
@@ -136,7 +150,7 @@ def fit_branch(chi, r, reference, sigma_r=None, min_decade=1.0):
     b0 = float(np.clip(b0, 0.1, 10.0))
     p0 = np.array([0.95 * chi_min, b0,
                    ly[-1] - b0 * np.log(eps0[-1])])
-    sol = least_squares(resid, p0,
+    sol = least_squares(resid, p0, jac=jac,
                         bounds=([1e-300, 0.05, -np.inf],
                                 [chi_min * (1 - 1e-9), 20.0, np.inf]))
     if not sol.success:
@@ -192,9 +206,12 @@ def kernel_tail_from_beta(beta, sigma_beta=0.0, n_sigma=2.0):
     within `n_sigma` error bars: every kernel with s >= 3 (compact
     support, Gaussian, any decay faster than |u|^-3) produces
     beta = 1/2, so the measurement identifies only the class.  Also
-    refuses beta significantly BELOW 1/2, which no locking kernel in
-    this dictionary produces -- that is a sign the fitted range left
-    the near-threshold regime.
+    refuses beta significantly BELOW 1/2, which no locking kernel
+    produces on a line with a rounded maximum at its centre -- usually
+    a sign the fitted range left the near-threshold regime.  (A line
+    that is flat at its centre, such as a box, does give
+    beta = 1/(s-1) < 1/2 for a tail s > 3; this function assumes a
+    rounded line and does not cover that case.)
     """
     b = float(beta)
     sb = abs(float(sigma_beta))
@@ -204,9 +221,9 @@ def kernel_tail_from_beta(beta, sigma_beta=0.0, n_sigma=2.0):
         raise ValueError(
             f"beta = {b:.4g} +- {sb:.4g} lies significantly below "
             "1/2, which no locking kernel produces in the dictionary "
-            "beta = 1/(s-1) (1 < s < 3), 1/2 (s >= 3). The fitted "
-            "range has likely left the near-threshold regime; refit "
-            "closer to the onset")
+            "beta = 1/(s-1) (1 < s < 3), 1/2 (s >= 3) of a line with "
+            "a rounded centre. The fitted range has likely left the "
+            "near-threshold regime; refit closer to the onset")
     if b - n_sigma * sb <= 0.5:
         raise ValueError(
             f"beta = {b:.4g} +- {sb:.4g} is consistent with 1/2, "
@@ -235,7 +252,7 @@ def beta_relative_sigma(n_points, decades, sigma_log):
     the exact variance of the least-squares slope; the tests hold it
     against seeded simulation.  This is the KNOWN-threshold error --
     fitting chi_c together with beta (as `fit_branch` does) is
-    strictly harder, so plan with margin.
+    strictly harder; `plan_fit` gives that error bar.
     """
     n = int(n_points)
     if n < 3:
@@ -269,3 +286,138 @@ def points_for_beta(target_sigma_beta, decades, sigma_log):
                 "of reach at this noise and range; widen the range "
                 "or reduce the noise")
     return n, beta_relative_sigma(n, decades, sigma_log)
+
+
+@dataclass(frozen=True)
+class FitPlan:
+    """Error bars a planned measurement will give (see `plan_fit`).
+
+    sigma_beta is absolute; sigma_chi_c_rel and sigma_amplitude_rel are
+    relative (sigma_chi_c / chi_c and sigma_A / A).
+    """
+    n_points: int
+    eps_range: tuple
+    beta: float
+    sigma_log: float
+    fit_threshold: bool
+    sigma_beta: float
+    sigma_chi_c_rel: float
+    sigma_amplitude_rel: float
+
+
+def plan_fit(n_points, eps_min, eps_max, beta, sigma_log,
+             fit_threshold=True):
+    """The error bars `fit_branch` will report, before measuring.
+
+    n_points : couplings to measure, spaced evenly in log(eps) from
+        eps_min to eps_max, where eps = chi/chi_c - 1 (both ends
+        included).  In practice, a first rough estimate of chi_c places
+        them.
+    beta : the exponent you expect.  It enters only the threshold
+        column below, as a factor; so sigma_beta and sigma_amplitude_rel
+        do not depend on beta at all, and sigma_chi_c_rel is
+        proportional to 1/beta.
+    sigma_log : per-point scatter of log R (sigma_R / R for small noise).
+    fit_threshold : True (default) for the three-parameter fit that
+        `fit_branch` does; False for a threshold known in advance.
+
+    The fitted model is log R = log A + beta log(chi/chi_c - 1).  Its
+    derivatives at each point, with respect to (log chi_c, beta,
+    log A), are (-beta (1+eps)/eps, log eps, 1); stacked into a matrix
+    J, the asymptotic covariance is sigma_log^2 (J^T J)^-1.  This is
+    the same covariance `fit_branch` reports when it is given
+    sigma_r = sigma_log * r and the model holds, and it is exact to
+    first order in the noise.  With fit_threshold=False the first
+    column is dropped and sigma_beta equals `beta_relative_sigma`.  The
+    error bars do not depend on chi_c or A.
+
+    Fitting the threshold as well makes sigma_beta larger than the
+    known-threshold value, by a factor that depends on the span of eps
+    and not on beta: for 12 points about 2.0 over two decades,
+    1.6 over three and 1.3 over five (for example 0.0021 instead of
+    0.0013 over eps = 1e-5 .. 1e-2 with sigma_log = 0.01).
+
+    The tests hold it against the closed form for a known threshold,
+    against the error bars `fit_branch` reports on noiseless data, and
+    against the scatter of 300 seeded simulated fits.  Refuses fewer
+    than 6 points for a fitted threshold (fit_branch needs 6) or 3 for
+    a known one, a non-positive or reversed eps range, and a
+    non-positive beta or sigma_log.
+    """
+    n = int(n_points)
+    need = 6 if fit_threshold else 3
+    if n < need:
+        raise ValueError(f"need >= {need} points "
+                         f"({'fitted' if fit_threshold else 'known'} "
+                         "threshold)")
+    lo, hi = float(eps_min), float(eps_max)
+    if not (np.isfinite(lo) and np.isfinite(hi) and 0.0 < lo < hi):
+        raise ValueError("need 0 < eps_min < eps_max, both finite")
+    b, s = float(beta), float(sigma_log)
+    if not (np.isfinite(b) and b > 0.0 and np.isfinite(s) and s > 0.0):
+        raise ValueError("beta and sigma_log must be finite and positive")
+    eps = np.geomspace(lo, hi, n)
+    cols = [np.log(eps), np.ones(n)]
+    if fit_threshold:
+        cols = [-b * (1.0 + eps) / eps] + cols
+    jac = np.stack(cols, axis=1)
+    # column scaling and QR keep (J^T J)^-1 accurate when the threshold
+    # column is many orders of magnitude larger than the others
+    norms = np.linalg.norm(jac, axis=0)
+    rmat = np.linalg.qr(jac / norms, mode="r")
+    if np.linalg.cond(rmat) > 1e12:
+        raise ValueError("the planned points do not constrain all "
+                         "parameters independently")
+    rinv = np.linalg.inv(rmat)
+    cov = s ** 2 * (rinv @ rinv.T) / np.outer(norms, norms)
+    sig = np.sqrt(np.diag(cov))
+    if fit_threshold:
+        s_chi, s_beta, s_amp = sig
+    else:
+        s_chi, (s_beta, s_amp) = 0.0, sig
+    return FitPlan(n_points=n, eps_range=(lo, hi), beta=b, sigma_log=s,
+                   fit_threshold=bool(fit_threshold),
+                   sigma_beta=float(s_beta), sigma_chi_c_rel=float(s_chi),
+                   sigma_amplitude_rel=float(s_amp))
+
+
+def points_for_fit(target_sigma_beta, eps_min, eps_max, beta, sigma_log,
+                   fit_threshold=True):
+    """Points needed for a target error bar on beta, threshold fitted.
+
+    Like `points_for_beta`, but for the fit `fit_branch` actually does
+    (see `plan_fit`).  Returns (n, FitPlan) with plan.sigma_beta <=
+    target and n-1 points failing it.  The count is searched by doubling
+    and bisection, which assumes the error bar falls as points are added
+    over a fixed range (checked in the tests for n = 6 .. 400); the
+    result is then confirmed against n-1.  Refuses a target that would
+    need more than 10^7 points.
+    """
+    tgt = float(target_sigma_beta)
+    if not (np.isfinite(tgt) and tgt > 0.0):
+        raise ValueError("target_sigma_beta must be positive")
+
+    def sb(n):
+        return plan_fit(n, eps_min, eps_max, beta, sigma_log,
+                        fit_threshold).sigma_beta
+
+    lo = 6 if fit_threshold else 3
+    if sb(lo) <= tgt:
+        return lo, plan_fit(lo, eps_min, eps_max, beta, sigma_log,
+                            fit_threshold)
+    hi = lo
+    while sb(hi) > tgt:
+        lo, hi = hi, 2 * hi
+        if hi > 10 ** 7:
+            raise ValueError(
+                "over 10^7 points would be needed: the target is out "
+                "of reach at this noise and range; widen the range "
+                "or reduce the noise")
+    while hi - lo > 1:      # sb(lo) > tgt >= sb(hi)
+        mid = (lo + hi) // 2
+        if sb(mid) > tgt:
+            lo = mid
+        else:
+            hi = mid
+    return hi, plan_fit(hi, eps_min, eps_max, beta, sigma_log,
+                        fit_threshold)

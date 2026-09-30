@@ -70,6 +70,24 @@ class Kernel:
         # A slowly decaying tail needs the decades resolved explicitly.
         return 2 * mp.quad(self.W, [0, 1, 10, 100, 1000, mp.inf])
 
+    def second_moment(self) -> mp.mpf:
+        """M_2 = int u^2 W(u) du.
+
+        It sets the curvature correction G(0) - G(Omega) ~ Omega^2 and so
+        the amplitude of the beta = 1/2 class (see
+        `lockkernel.parametric.amplitude_curvature`).  It is finite only for
+        compact support, faster than algebraic decay, or a tail s > 3;
+        a kernel with tail s <= 3 is refused.
+        """
+        if self.support is not None:
+            return 2 * mp.quad(lambda u: u ** 2 * self.W(u), [0, self.support])
+        if self.tail is not None and self.tail <= 3:
+            raise ValueError(
+                f"the second moment of a kernel with tail s = {self.tail:g} "
+                "diverges (it converges only for s > 3)")
+        return 2 * mp.quad(lambda u: u ** 2 * self.W(u),
+                           [0, 1, 10, 100, 1000, mp.inf])
+
 
 def conservative() -> Kernel:
     """The conservative spin kernel, W = 1/(1+u^2), mass pi."""
@@ -119,6 +137,13 @@ def predicted_beta(s) -> float:
     crossover at s = 3 is where the second moment of the kernel stops
     converging, so that the leading correction to the self consistency changes
     from being set by the tail to being set by the curvature of the line.
+
+    The value 1/2 assumes the line has a rounded maximum at its centre,
+    p''(0) < 0 (every shipped line except `box`).  On a line that is flat
+    at the centre, such as `box`, there is no curvature term: a tail gives
+    beta = 1/(s-1) for every s > 1 (so beta < 1/2 for s > 3), and a
+    compactly supported kernel gives no power law at all (the order
+    parameter jumps).  This function does not cover that case.
     """
     if s is None or s >= 3:
         return 0.5

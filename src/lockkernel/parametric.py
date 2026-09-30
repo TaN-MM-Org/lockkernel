@@ -51,6 +51,13 @@ The crossover at s = 3 is exactly where the second moment M_2 of the kernel
 stops converging, so that the tail contribution and the curvature contribution
 exchange dominance.
 
+The value 1/2 needs a curvature term, p''(0) < 0.  On a line that is flat at
+its centre (the `box` line) G(0) - G(Omega) = p(0) int_{|u| > w/Omega} W(u) du
+exactly, for Omega below the half width w, so a tail gives beta = 1/(s-1) for
+every s > 1 (below 1/2 once s > 3), and a compactly supported kernel gives
+G(Omega) = G(0): no power law, the order parameter jumps at the threshold.
+For p''(0) > 0 (a dip at the centre) the branch bends back.
+
 THE CONSERVATIVE CASE.  For conservative spins W(u) = 1/(1+u^2), whence
 s = 2, m = pi and beta = 1.  Then H is a Lorentzian smoothing of the line,
 
@@ -75,24 +82,53 @@ from .lineshapes import LineShape
 
 __all__ = ["G_of_Omega", "H_of_Omega", "branch_point", "threshold",
            "c_coefficient", "amplitude", "sweep", "extract_beta",
-           "fold_interval"]
+           "fold_interval", "tail_integral", "amplitude_general",
+           "amplitude_curvature"]
 
 INF = mp.inf
 
 
-def _breakpoints(line: LineShape, kernel: Kernel, Omega):
-    """Quadrature break points in u for int p(Omega u) W(u) du.
+def _half_points(line: LineShape, kernel: Kernel, Omega):
+    """Break points on u >= 0 for an even integrand, the start X of the tail
+    that `_even_quad` maps onto (0, 1] (None for compact support), and the
+    power k of that map.
 
-    The integrand has structure on two scales: the kernel varies on u ~ 1 and
-    the line varies on u ~ scale/Omega.  Both are given to the quadrature.
+    The integrand has structure on two scales: the kernel varies on u ~ 1
+    and the line on u ~ scale/Omega.  Both are given to the quadrature.
     """
     s = mp.mpf(line.scale) / Omega
     if kernel.support is not None:
         cut = mp.mpf(kernel.support)
-        pts = sorted({mp.mpf(0), min(s, cut), cut})
-        return [-p for p in reversed(pts)] + list(pts)[1:]
-    pts = sorted({mp.mpf(0), mp.mpf(1), s, 10 * s, mp.mpf(10)})
-    return [-INF] + [-p for p in reversed(pts) if p > 0] + list(pts) + [INF]
+        return sorted({mp.mpf(0), min(s, cut), cut}), None, 1
+    pos = sorted({mp.mpf(0), mp.mpf(1), mp.mpf(10), s, 10 * s})
+    k = 1 / (mp.mpf(kernel.tail) - 1) if kernel.tail is not None else 1
+    return pos, pos[-1], k
+
+
+def _even_quad(f, pos, X, k=1):
+    """(2 int_0^inf f(u) du, error estimate) for an even integrand f.
+
+    Three parts.  Up to u = 1 the integral is taken directly.  From u = 1
+    to X it is taken in v = log(u), because the integrand there falls or
+    rises like a power of u across many decades: on a linear scale the
+    quadrature cannot resolve the start of a segment such as
+    [10, 10^12], and before 1.2.0 this left G(Omega) about 4e-10 off at
+    Omega = 1e-12 and mpmath's default 15 digits.  The tail [X, inf) is
+    mapped onto (0, 1] by u = X t^(-k); with k = 1/(s-1) a tail
+    f ~ u^(-s) becomes a constant at t -> 0.  (mpmath's own treatment of
+    [X, inf) with X large is good only to about 1e-9 relative at 15
+    digits.)  `pos` lists the break points on u >= 0; for compact support
+    (X None) they are all integrated directly.
+    """
+    if X is None:
+        return tuple(2 * x for x in mp.quad(f, pos, error=True))
+    lin = [p for p in pos if p <= 1]
+    logs = [mp.log(p) for p in pos if p >= 1]
+    v, e = mp.quad(f, lin, error=True)
+    v1, e1 = mp.quad(lambda w: f(mp.exp(w)) * mp.exp(w), logs, error=True)
+    v2, e2 = mp.quad(lambda t: f(X * t ** -k) * k * X * t ** (-k - 1),
+                     [0, 1], error=True)
+    return 2 * (v + v1 + v2), 2 * (e + e1 + e2)
 
 
 def G_of_Omega(line: LineShape, kernel: Kernel, Omega) -> mp.mpf:
@@ -101,7 +137,7 @@ def G_of_Omega(line: LineShape, kernel: Kernel, Omega) -> mp.mpf:
     if Omega == 0:
         return line.p0() * kernel.mass()
     f = lambda u: line.pdf(Omega * u) * kernel.W(u)
-    return mp.quad(f, _breakpoints(line, kernel, Omega))
+    return _even_quad(f, *_half_points(line, kernel, Omega))[0]
 
 
 def H_of_Omega(line: LineShape, kernel: Kernel, Omega) -> mp.mpf:
@@ -114,13 +150,56 @@ def threshold(line: LineShape, kernel: Kernel) -> mp.mpf:
     return 1 / (line.p0() * kernel.mass())
 
 
+def _G0_minus_G(line: LineShape, kernel: Kernel, Omega) -> mp.mpf:
+    """D(Omega) = G(0) - G(Omega) = int [p(0) - p(Omega u)] W(u) du.
+
+    The reduced coupling is eps = G(0)/G(Omega) - 1 = D / G.  Forming it
+    as chiN/chiN_c - 1 subtracts two nearly equal numbers and loses
+    about log10(1/eps) digits; integrating the difference directly does
+    not.  Two details keep the digits.  p(0) - p(Omega u) itself cancels
+    near the centre of the line, by about 2 log10(scale/Omega) digits, so
+    it is formed with that many guard digits.  And mpmath's quadrature
+    stops on an ABSOLUTE error estimate, which a small D meets too early,
+    so the integral is done twice, the second time with the integrand
+    divided by the size the first pass found.
+    """
+    Omega = mp.mpf(Omega)
+    if Omega == 0:
+        return mp.mpf(0)
+    ratio = Omega / mp.mpf(line.scale)
+    guard = 10
+    if ratio < 1:
+        guard += int(mp.ceil(-2 * mp.log10(ratio)))
+    with mp.extradps(guard):
+        p0 = line.p0()
+
+    def f(u):
+        with mp.extradps(guard):
+            d = p0 - line.pdf(Omega * u)
+        return (+d) * kernel.W(u)
+
+    pts = _half_points(line, kernel, Omega)
+    val = _even_quad(f, *pts)[0]
+    if val == 0:
+        return val
+    size = abs(val)
+    return size * _even_quad(lambda u: f(u) / size, *pts)[0]
+
+
 def branch_point(line: LineShape, kernel: Kernel, Omega):
-    """One point of the branch: (chiN, R, eps) at locking bandwidth Omega."""
+    """One point of the branch: (chiN, R, eps) at locking bandwidth Omega.
+
+    chiN = 1/G(Omega), R = Omega G(Omega), and the reduced coupling
+    eps = chiN/chiN_c - 1 is computed as [G(0) - G(Omega)] / G(Omega) from
+    a direct integral of the difference, so it keeps the working precision
+    however small it is (since 1.2.0; before, it lost about log10(1/eps)
+    digits to cancellation).
+    """
     Omega = mp.mpf(Omega)
     G = G_of_Omega(line, kernel, Omega)
     chiN = 1 / G
     R = Omega * G
-    eps = chiN / threshold(line, kernel) - 1
+    eps = _G0_minus_G(line, kernel, Omega) / G
     return chiN, R, eps
 
 
@@ -135,8 +214,24 @@ def extract_beta(line: LineShape, kernel: Kernel, exponents):
     Returned as a list with one fewer entry than `exponents`.  Convergence of
     the list is the evidence that the exponent has been reached; the last
     entry is quoted as the measured exponent.
+
+    Refuses (ValueError) when a point has eps <= 0, that is, a coupling at
+    or below the threshold: the branch then bends back (a first order,
+    hysteretic onset, see `fold_interval`) or is flat (the order parameter
+    jumps at the threshold), and there is no power law to measure.  Before
+    1.2.0 a backward branch returned a plausible looking slope and a flat
+    one raised ZeroDivisionError.
     """
     pts = sweep(line, kernel, exponents)
+    for e, p in zip(exponents, pts):
+        if not p[2] > 0:
+            raise ValueError(
+                f"eps = {mp.nstr(p[2], 5)} <= 0 at Omega = 10^{e}: the branch "
+                "is at or below the threshold there, so the onset is not a "
+                "power law R ~ eps^beta. A negative eps means the branch "
+                "bends back (first order, hysteretic onset; see "
+                "fold_interval); eps = 0 means it is flat and R jumps at "
+                "the threshold")
     out = []
     for i in range(len(pts) - 1):
         e0, r0 = pts[i][2], pts[i][1]
@@ -229,49 +324,138 @@ def amplitude_general(line: LineShape, kernel: Kernel, C=None) -> mp.mpf:
     return p0m * (p0m / (mp.mpf(C) * tail_integral(line, s))) ** (1 / (s - 1))
 
 
+def amplitude_curvature(line: LineShape, kernel: Kernel) -> mp.mpf:
+    """A in R = A eps^(1/2), for the class where beta = 1/2.
+
+    That class is every kernel with compact support (Kuramoto), faster
+    than algebraic decay (Gaussian), or a tail s > 3, on a line with a
+    rounded maximum at its centre, p''(0) < 0.  There the first
+    correction to G(0) = p(0) m is set by the curvature of the line,
+
+        G(Omega) = G(0) + (1/2) p''(0) M_2 Omega^2 + ...,
+        M_2 = int u^2 W(u) du,
+
+    and with eps = G(0)/G - 1 and R = Omega G this gives
+
+        A = G(0)^(3/2) sqrt( 2 / (-p''(0) M_2) ),     G(0) = p(0) m.
+
+    For the Kuramoto kernel on a Lorentzian line A = 1, which is the
+    closed form R = sqrt(1 - chiN_c/chiN) near its onset.  The next
+    correction to R / sqrt(eps) is of relative order Omega^2, or
+    Omega^(s-3) for a tail 3 < s < 5, so it is approached slowly just
+    above s = 3.
+
+    Refuses a kernel with tail s <= 3 (M_2 diverges; use `amplitude` or
+    `amplitude_general`) and a line with p''(0) >= 0: at p''(0) = 0 (a
+    flat top, such as `box`) there is no curvature term, and at
+    p''(0) > 0 (a dip at the centre) the branch bends back and the onset
+    is first order.  p''(0) is taken by mpmath's numerical
+    differentiation.
+    """
+    M2 = kernel.second_moment()
+    pp = mp.diff(line.pdf, mp.mpf(0), 2)
+    if not pp < 0:
+        raise ValueError(
+            f"p''(0) = {mp.nstr(pp, 5)} is not negative: the line has no "
+            "rounded maximum at its centre, so the onset is not of the "
+            "form R = A eps^(1/2) (flat top: no curvature term; dip: the "
+            "branch bends back and the onset is first order)")
+    G0 = line.p0() * kernel.mass()
+    return G0 * mp.sqrt(2 * G0 / (-pp * M2))
+
+
+def _dG_dOmega(line: LineShape, kernel: Kernel, Omega) -> mp.mpf:
+    """dG/dOmega = int u p'(Omega u) W(u) du, for a differentiable line."""
+    Omega = mp.mpf(Omega)
+    f = lambda u: u * mp.diff(line.pdf, Omega * u) * kernel.W(u)
+    return _even_quad(f, *_half_points(line, kernel, Omega))[0]
+
+
 def fold_interval(line: LineShape, kernel: Kernel = None, n: int = 400,
                   lo: float = -4.0, hi: float = 1.5):
     """Locate a fold in the branch, if there is one.
 
-    The branch chiN(Omega) is sampled on a logarithmic grid.  Where it is not
-    monotonic there are two turning points, and between the couplings they
-    define the stationary condition has three solutions, so the onset is
-    hysteretic.  Each turning point is refined by solving d chiN / d Omega = 0
-    rather than being read off the grid, and the size of the jump is measured
-    at the upper turning point, where the low branch ceases to exist and the
-    order parameter must move to the highest solution at the same coupling.
+    G(Omega), and so chiN = 1/G, is sampled at n points with Omega from
+    10^lo to 10^hi, evenly spaced in log(Omega).  Where chiN(Omega) is not
+    monotonic the branch folds: between the two turning points the
+    stationary condition has three solutions, and the onset is
+    hysteretic.  Each turning point is refined by solving
+    dG/dOmega = int u p'(Omega u) W(u) du = 0, so the line must be
+    differentiable (a fold on a line with compact support is refused).
+    The jump is found at the upper turning point, where the low branch
+    ends and R must move to the highest solution at the same coupling.
 
-    Returns None when the branch is monotonic.
+    Two shapes are handled.  If chiN falls from the start of the grid
+    with chiN(10^lo) below the threshold, the branch leaves the threshold
+    backwards (a subcritical onset, as for conservative spins with c < 0),
+    and the low branch ends at the threshold itself: Omega_hi = 0,
+    chiN_hi = chiN_c, R_low = 0, all exact.  Otherwise it rises first and
+    folds later (an S shape) and both turning points are interior.
+    Structure below 10^lo or finer than the grid is not resolved; with
+    several folds, the first and last turning points are used.
+
+    Returns None when the branch is monotonic on the grid, otherwise a
+    dict with chiN_lo, chiN_hi (the coupling range of the hysteresis),
+    R_low (R at the end of the low branch), R_jump (R after the jump, or
+    None if the high branch does not reach chiN_hi below 10^hi),
+    R_high_at_lo (R where the high branch ends), Omega_lo, Omega_hi and
+    Omega_jump.
+
+    Cost: n + about 40 quadratures (about 0.1 s each at 15 digits on a
+    two-peaked Gaussian line).  Changed in 1.2.0: the turning points are
+    refined from the integral for dG/dOmega instead of differentiating the
+    quadrature numerically (roughly 20 times faster), a refinement that
+    fails now raises instead of silently returning a grid point, and a
+    subcritical onset returns the exact threshold as chiN_hi instead of
+    the first grid point.
     """
     kernel = kernel or conservative()
-    Om = [mp.mpf(10) ** (lo + (hi - lo) * i / (n - 1)) for i in range(n)]
-    chi = [branch_point(line, kernel, o)[0] for o in Om]
-    down = [i for i in range(len(chi) - 1) if chi[i + 1] < chi[i]]
-    if not down:
+    Om = [mp.mpf(10) ** (lo + (hi - lo) * mp.mpf(i) / (n - 1)) for i in range(n)]
+    G = [G_of_Omega(line, kernel, o) for o in Om]
+    # chiN = 1/G falls where G rises; ignore changes at the rounding level
+    tiny = mp.mpf(2) ** (20 - mp.mp.prec)
+    up = [i for i in range(n - 1) if G[i + 1] > G[i] * (1 + tiny)]
+    if not up:
         return None
-    i0, i1 = down[0], down[-1] + 1
+    if line.compact_support is not None:
+        raise ValueError(
+            f"{line.name} has compact support (it is not differentiable at "
+            "its edge), and the turning points are refined from p'; "
+            "fold_interval does not handle this line")
+    i0, i1 = up[0], up[-1] + 1
+    G0 = line.p0() * kernel.mass()
+    seen = {}
 
-    dchi = lambda o: mp.diff(lambda x: branch_point(line, kernel, x)[0], o)
-    def refine(ia, ib):
-        try:
-            return mp.findroot(dchi, (Om[ia], Om[ib]), solver="bisect",
-                               tol=mp.mpf("1e-16"))
-        except Exception:
-            return Om[ia]
+    def dG(o):            # each value costs a quadrature; keep them
+        if o not in seen:
+            seen[o] = _dG_dOmega(line, kernel, o)
+        return seen[o]
 
-    O_hi = refine(max(i0 - 1, 0), min(i0 + 1, n - 1))   # end of the low branch
-    O_lo = refine(max(i1 - 1, 0), min(i1 + 1, n - 1))   # end of the high branch
-    chiN_hi, R_low, _ = branch_point(line, kernel, O_hi)
-    chiN_lo, R_high_at_lo, _ = branch_point(line, kernel, O_lo)
+    def turning(ia, ib):
+        for _ in range(3):
+            a, b = Om[ia], Om[ib]
+            if dG(a) * dG(b) <= 0:
+                return mp.findroot(dG, (a, b), solver="anderson")
+            ia, ib = max(ia - 1, 0), min(ib + 1, n - 1)
+        raise RuntimeError(
+            "a turning point of the branch was not bracketed on the grid; "
+            "raise n, or lower lo if it lies below 10^lo")
 
-    # the state the system jumps to: the largest Omega with chiN(Omega) = chiN_hi
-    f = lambda o: branch_point(line, kernel, o)[0] - chiN_hi
+    if i0 == 0 and G[0] > G0:
+        O_hi, G_hi = mp.mpf(0), G0          # leaves the threshold backwards
+    else:
+        O_hi = turning(max(i0 - 1, 0), min(i0 + 1, n - 1))
+        G_hi = G_of_Omega(line, kernel, O_hi)
+    O_lo = turning(max(i1 - 1, 0), min(i1 + 1, n - 1))
+    G_lo = G_of_Omega(line, kernel, O_lo)
+
+    # the state the system jumps to: the largest Omega with G(Omega) = G_hi
     O_jump = None
     for k in range(i1, n - 1):
-        if f(Om[k]) * f(Om[k + 1]) <= 0:
-            O_jump = mp.findroot(f, (Om[k], Om[k + 1]), solver="bisect",
-                                 tol=mp.mpf("1e-14"))
-    R_jump = branch_point(line, kernel, O_jump)[1] if O_jump else None
-    return dict(chiN_lo=chiN_lo, chiN_hi=chiN_hi,
-                R_low=R_low, R_jump=R_jump, R_high_at_lo=R_high_at_lo,
-                Omega_lo=O_lo, Omega_hi=O_hi)
+        if (G[k] - G_hi) * (G[k + 1] - G_hi) <= 0:
+            O_jump = mp.findroot(lambda o: G_of_Omega(line, kernel, o) - G_hi,
+                                 (Om[k], Om[k + 1]), solver="anderson")
+    R_jump = O_jump * G_of_Omega(line, kernel, O_jump) if O_jump else None
+    return dict(chiN_lo=1 / G_lo, chiN_hi=1 / G_hi,
+                R_low=O_hi * G_hi, R_jump=R_jump, R_high_at_lo=O_lo * G_lo,
+                Omega_lo=O_lo, Omega_hi=O_hi, Omega_jump=O_jump)
