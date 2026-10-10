@@ -5,6 +5,109 @@ form, an exact identity, high-precision quadrature against
 independent closed forms, or seeded simulation; the release notes on
 GitHub carry the full anchor lists.
 
+## 1.3.0 (2026-10-10)
+
+### Added
+
+- `fit_branch(..., sigma_chi=...)`: errors of the measured couplings.
+  Near the threshold an error in chi moves log R by
+  `beta sigma_chi / (chi - chi_c)`; this is added to each point's
+  variance at the fitted chi_c and beta, and the fit is repeated until
+  the weights settle (effective variance, first order in sigma_chi).
+  Requires `sigma_r`; refused where sigma_chi exceeds 0.25 (chi -
+  chi_c). Tests: with coupling noise of 0.1 (chi - chi_c) at the first
+  point, the reported error bars of chi_c, beta and A match the scatter
+  of 300 seeded fits within 12 %, while without `sigma_chi` sigma_beta
+  is more than 15 % too small (about 23 %); `sigma_chi = 0` reproduces
+  the plain fit exactly. By hand, 1000 seeded fits at 0.1, 0.2 and 0.3
+  held within 6 %, for noise on the true or on the recorded coupling.
+- Goodness of fit: with `sigma_r`, `BranchFit` now carries `chi2`,
+  `dof` and `p_value` (chi-square tail probability), `None` without
+  `sigma_r`. Tests: chi2 recomputed from the returned parameters;
+  p-values of 300 seeded fits under the model pass a Kolmogorov-Smirnov
+  test for uniformity and chi2 averages to dof; on the exact branch
+  `R = eps/(1+eps)` (conservative kernel, Lorentzian line) with 1 %
+  noise, p > 0.05 for points up to eps = 0.01 and p < 1e-10 (with beta
+  more than 10 error bars from 1) up to eps = 0.5.
+- `measured.with_calibration(fit, chi_scale_rel, r_scale_rel)` (also at
+  the top level): adds the relative uncertainty of an overall coupling
+  scale to sigma_chi_c and of an overall R scale to sigma_A, in
+  quadrature; beta is exactly immune to both. Tests: refitting data
+  with the couplings scaled by 1.07 scales chi_c by 1.07 to 1e-9 and
+  leaves beta and A unchanged to 1e-7; scaling R scales only A.
+- `BranchFit` gains `dof`, `chi2`, `p_value`, `sigma_chi_used` and
+  `calibration_rel`, all with defaults.
+- Tests for `class_exact`, which had none: it matches `full_exact` to
+  1e-10 in R and 1e-9 in xi^2.
+- README examples 10 (consistency of data with the power law) and 11
+  (coupling errors and calibration).
+
+### Fixed
+
+- `Kernel.mass()` and `Kernel.second_moment()` integrated slow
+  algebraic tails directly to infinity. At 15 digits `power_tail(1.1)`
+  had mass 20.0312 instead of 20.2745 (3.7e-4 relative error at 30
+  digits), so `threshold` on a Lorentzian line of FWHM 1 was 0.0784174
+  instead of 0.0774765; `second_moment` of `power_tail(3.1)` was
+  19.7910 instead of 20.0343; the averaged Kuramoto kernel with
+  gamma = 3.4 had a mass 1.4e-8 off. The tail is now mapped onto (0, 1]
+  as in `G_of_Omega`; all match their closed forms to 1e-13 or better
+  at 15 digits (the `power_tail` masses to 1e-14, and to 1e-28 at 30
+  digits). Tests: `test_mass_of_slow_tails`,
+  `test_threshold_of_a_slow_tail_matches_the_branch`,
+  `test_heterogeneous_kuramoto_mass_closed_form`,
+  `test_second_moment_of_slow_tails`.
+- `tail_integral` integrated the singularity delta^(2-s) at the center
+  directly: on a Lorentzian line of FWHM 1 at 15 digits I_s was 47.063
+  instead of 47.715 at s = 2.9, 86.97 instead of 98.49 at s = 2.95, and
+  7.9999999964 instead of 8 at s = 2.5. It now substitutes
+  delta = scale t^(1/(3-s)), takes p' with guard digits (and as
+  p''(0) delta very close to the center), and integrates in units of the
+  line width; it matches closed forms on Lorentzian and Gaussian lines of
+  widths 0.001, 1 and 1000 to 1e-13 for s from 1.1 to 2.99. Test:
+  `test_tail_integral_closed_forms`, `test_tail_integral_at_30_digits`.
+- `amplitude_general`, through the two fixes above, on a Gaussian line
+  at 15 digits: 8.4219 -> 9.6179 for s = 1.1 and 0.45574 -> 0.45258 for
+  s = 2.9. Its default tail amplitude C (W(v) v^s at v = 1e6) was used
+  unchecked: for `heterogeneous(conservative(), 3.8)` it is 6.2 % below
+  the asymptotic value (8.5819 against the closed form 9.1498), which
+  made A 8.3 % high (0.60510 against 0.55853). It is now compared with
+  the value at v = 1e9 and refused if they differ by more than 1e-6.
+  Tests: `test_general_amplitude_closed_form_on_a_lorentzian`,
+  `test_general_amplitude_tail_amplitude_check`.
+- `fit_branch` returned the limit of its search as the exponent: for
+  noiseless R = 0.8 eps^0.04 it reported beta = 0.0500 +- 0.0040, for
+  eps^25 beta = 20 +- 1.5. It now refuses. Test:
+  `test_fit_refuses_an_exponent_at_the_search_limit`.
+- `class_exact` skipped a time earlier than the previous one and
+  returned the later state: times [1.0, 0.2] on the system of README
+  example 9 gave R = 0.677579 for both; at t = 0.2 it is 0.984316. It
+  now propagates in either direction. Test:
+  `test_class_exact_times_in_any_order`.
+
+### Changed
+
+- Input checks with clear messages: line shapes refuse widths that are
+  not finite and positive (`lorentzian(-1)` used to return a negative
+  density); `power_tail` refuses a non-finite s; `predicted_beta`
+  refuses s <= 1 (it returned -2.0 for s = 0.5); `heterogeneous`
+  refuses non-positive eta or k_min; `fit_branch` refuses non-positive
+  couplings (before, SciPy's message about bounds), arrays that are not
+  one-dimensional, non-finite sigma_r and a negative or non-finite
+  min_decade; `kernel_tail_from_beta`
+  refuses a non-finite sigma_beta (it returned a NaN error) and a
+  negative n_sigma; `beta_relative_sigma` and `plan_fit` refuse a
+  number of points that is not a whole number (12.9 was taken as 12)
+  and non-finite inputs; `amplitude_general` refuses a kernel without a
+  tail in 1 < s < 3 with a ValueError (it raised TypeError) and a
+  non-positive C; `class_exact` refuses populations that are not whole
+  numbers (they were truncated) and mismatched lengths.
+- Type hints on the public functions of `measured`, and on
+  `predicted_beta` and the `exact` functions.
+- README: the lab half's new features, the new checks and refusals,
+  corrections, limits, and 128 tests (from 97). Examples 1 to 9 print
+  the same as with 1.2.0. All 97 earlier tests pass unchanged.
+
 ## v1.2.0 - 2026-09-30
 
 ### Added

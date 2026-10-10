@@ -29,10 +29,13 @@ The collective motion must be the one the oscillators themselves
 produce (the "self-consistency condition"); one substitution turns
 that condition into an exact formula (a "parametric solution") valid
 for any frequency spread and any kernel. The exponent depends only on how fast the kernel falls off
-far from the centre (its **tail**). The **lab half** (`lockkernel.measured`)
+far from the center (its **tail**). The **lab half** (`lockkernel.measured`)
 works the other way round: it fits measured points for the threshold
 and the exponent, reads the kernel's tail back off the exponent, and
-plans how many points a target error bar costs. When the data cannot
+plans how many points a target error bar costs. It also tests whether
+the data are consistent with the power law at their stated noise, and
+carries the uncertainties of the measured couplings and of calibration
+scales into the error bars. When the data cannot
 support the number asked for, it stops with an error message that says
 why, rather than returning a number that looks fine but is not.
 
@@ -131,8 +134,9 @@ and mpmath 1.2 or newer, and nothing else.
 ## Examples
 
 Each example below runs as written, and the output shown is what it
-printed with lockkernel 1.2.0. Line widths, couplings and noise levels
-are illustrative values, not taken from any experiment.
+printed with lockkernel 1.3.0 (examples 1 to 9 print the same as with
+1.2.0). Line widths, couplings and noise levels are illustrative
+values, not taken from any experiment.
 
 ### 1. Threshold and exponent from the theory
 
@@ -495,6 +499,98 @@ should. `xi^2` is the **Wineland spin-squeezing parameter**:
 1 for uncorrelated spins, below 1 when the spins are entangled in a way
 that improves phase measurements.
 
+### 10. Are the data consistent with the power law?
+
+```python
+import numpy as np
+from lockkernel import fit_branch
+
+# Conservative spins on a Lorentzian line of FWHM 1: chi_c = 1/2 and,
+# exactly, R = eps/(1+eps). 14 points from eps = 1e-4, 1 % seeded noise.
+rng = np.random.default_rng(4)
+for eps_max in (0.01, 0.1, 0.5):
+    eps = np.geomspace(1e-4, eps_max, 14)
+    r = eps / (1 + eps) * np.exp(rng.normal(0.0, 0.01, eps.size))
+    fit = fit_branch(0.5 * (1 + eps), r, sigma_r=0.01 * r,
+                     reference="illustrative: closed form + 1 % noise")
+    print(f"eps up to {eps_max:4}: beta = {fit.beta:.4f} +- {fit.sigma_beta:.4f}, "
+          f"chi2 = {fit.chi2:5.1f} for {fit.dof} dof, p = {fit.p_value:.2g}")
+```
+
+```
+eps up to 0.01: beta = 1.0001 +- 0.0037, chi2 =  11.1 for 11 dof, p = 0.44
+eps up to  0.1: beta = 0.9833 +- 0.0019, chi2 =  48.3 for 11 dof, p = 1.3e-06
+eps up to  0.5: beta = 0.9546 +- 0.0014, chi2 = 584.2 for 11 dof, p = 3.4e-118
+```
+
+The true exponent is 1. When the points reach far above the threshold,
+the branch bends away from the power law, and the fit returns a biased
+exponent with a small error bar: 0.9833 +- 0.0019 is 9 error bars from
+1. The error bar alone does not show this. The chi-square test does.
+When `sigma_r` is given, `fit_branch` also returns `chi2` (the weighted
+sum of squared misfits in `log R`), its degrees of freedom `dof`
+(points minus 3) and `p_value`, the chance of a misfit at least this
+large if the law and the stated errors were right. A very small
+`p_value` means one of the two is wrong: drop the points farthest from
+the threshold, or check `sigma_r`. Without `sigma_r` the scatter of the
+points sets the error scale, so there is nothing to test, and `chi2`
+and `p_value` are `None`.
+
+### 11. Errors in the couplings, and calibration
+
+```python
+import numpy as np
+from lockkernel import fit_branch, with_calibration
+
+# Stand-in measurement: R = 0.65 eps^(2/3) above chi_c = 0.5, at 14
+# recorded couplings. Each true coupling differs from the recorded one by
+# a seeded error of 5e-6 (a tenth of the distance to the threshold at the
+# first point), and R carries 1 % seeded noise.
+rng = np.random.default_rng(2)
+chi = 0.5 * (1 + np.geomspace(1e-4, 1e-1, 14))
+sigma_chi = np.full(chi.size, 5e-6)
+chi_true = chi + rng.normal(0.0, 1.0, chi.size) * sigma_chi
+r = 0.65 * (chi_true / 0.5 - 1) ** (2 / 3) * np.exp(rng.normal(0.0, 0.01, chi.size))
+
+ref = "illustrative: power law + seeded noise"
+plain = fit_branch(chi, r, ref, sigma_r=0.01 * r)
+full = fit_branch(chi, r, ref, sigma_r=0.01 * r, sigma_chi=sigma_chi)
+for name, f in (("errors of R only:", plain), ("errors of R and chi:", full)):
+    print(f"{name:20s} beta = {f.beta:.4f} +- {f.sigma_beta:.4f}, "
+          f"chi_c = {f.chi_c:.7f} +- {f.sigma_chi_c:.1e}, p = {f.p_value:.2g}")
+
+# The couplings share a 2 % calibration uncertainty, R a 5 % one:
+cal = with_calibration(full, chi_scale_rel=0.02, r_scale_rel=0.05)
+print(f"with calibration:    chi_c +- {cal.sigma_chi_c:.1e}, "
+      f"A = {cal.amplitude:.3f} +- {cal.sigma_amplitude:.3f}, "
+      f"beta +- {cal.sigma_beta:.4f} (unchanged)")
+```
+
+```
+errors of R only:    beta = 0.6698 +- 0.0020, chi_c = 0.4999987 +- 1.2e-06, p = 0.00051
+errors of R and chi: beta = 0.6658 +- 0.0026, chi_c = 0.5000034 +- 3.7e-06, p = 0.15
+with calibration:    chi_c +- 1.0e-02, A = 0.649 +- 0.033, beta +- 0.0026 (unchanged)
+```
+
+Near the threshold `R` rises steeply with the coupling, so a small
+error in the coupling moves `R` a lot: by `beta sigma_chi / (chi -
+chi_c)` in `log R`. Pass the coupling errors as `sigma_chi` and
+`fit_branch` adds this term to each point's error (to first order, and
+repeats the fit until the weights settle). Here, without it, the error
+bars are too small and the chi-square test says so (`p = 0.00051`).
+With it the fit is consistent (`p = 0.15`) and the exponent lands within
+its error bar of 2/3. `fit_branch` refuses `sigma_chi` larger than a
+quarter of `chi - chi_c` at any point, where first order is not enough.
+
+`with_calibration` adds the uncertainty of an overall scale factor: one
+common to all couplings (for example the conversion of a laser power
+into `chiN`), and one common to all `R` (for example a detection
+efficiency). Scaling every coupling scales the fitted threshold by the
+same factor and leaves `beta` and `A` exactly as they were; scaling
+`R` scales only `A`. So the two calibrations add to the error bars of
+`chi_c` and `A` in quadrature, and the exponent is immune to both. The
+tests check both statements by refitting scaled data.
+
 ## What is in the package
 
 The top level imports the `measured` names below and the submodules
@@ -541,10 +637,18 @@ directly.
 
 **Fitting measured data** (`lockkernel.measured`, also at the top level)
 
-- `fit_branch(chi, r, reference, sigma_r=None, min_decade=1.0)` --
-  returns a `BranchFit` with `chi_c`, `beta`, `amplitude`, their
-  errors, `n_points`, `eps_range`, `residual_rms_log` (the
-  root-mean-square misfit in `log R`) and `reference`.
+- `fit_branch(chi, r, reference, sigma_r=None, min_decade=1.0,
+  sigma_chi=None)` -- returns a `BranchFit` with `chi_c`, `beta`,
+  `amplitude`, their errors, `n_points`, `eps_range`,
+  `residual_rms_log` (the root-mean-square misfit in `log R`) and
+  `reference`. Since 1.3.0 it also has `dof`, `chi2` and `p_value`
+  (the last two `None` without `sigma_r`; example 10),
+  `sigma_chi_used` and `calibration_rel`. `sigma_chi` gives the errors
+  of the couplings (example 11).
+- `with_calibration(fit, chi_scale_rel=0, r_scale_rel=0)` -- the same
+  fit with the relative uncertainties of an overall coupling scale and
+  an overall `R` scale added to the error bars of `chi_c` and `A`
+  (example 11).
 - `kernel_tail_from_beta(beta, sigma_beta=0, n_sigma=2)` -- the tail
   exponent `s` and its error.
 - `beta_relative_sigma(n_points, decades, sigma_log)`,
@@ -576,7 +680,7 @@ directly.
 - `symmetric_exact` (all detunings equal, any number of emitters),
   `full_exact` (full quantum problem, up to about twelve emitters) and
   `class_exact` (emitters grouped by detuning, a few tens) -- exact
-  references. `class_exact` is not covered by the tests.
+  references. `class_exact` is tested against `full_exact` since 1.3.0.
 
 Each function's docstring (`help(lockkernel.fit_branch)`, for example)
 gives its inputs and conventions.
@@ -589,12 +693,19 @@ gives its inputs and conventions.
   saying where they come from;
 - fewer than 6 points are given, or `chi` and `r` differ in length
   (three parameters with error bars need more);
-- the couplings are not finite and strictly increasing, or an order
-  parameter is not finite and positive (points below the threshold,
-  `R = 0`, carry no exponent information; drop them);
-- `sigma_r` is not positive or not on the same grid as `r`;
+- the couplings are not finite, positive and strictly increasing, or
+  an order parameter is not finite and positive (points below the
+  threshold, `R = 0`, carry no exponent information; drop them);
+- `sigma_r` is not finite and positive, or not on the same grid as `r`;
 - the fit does not converge, or its covariance is singular (the data
   cannot pin down the three parameters separately);
+- the fitted exponent runs into the limits of the search, 0.05 or 20
+  (new in 1.3.0; the data are not a power law of this kind, for
+  example because `R` hardly changes, as at a jump);
+- `sigma_chi` is given without `sigma_r`, is negative, or is larger
+  than a quarter of `chi - chi_c` at some point (new in 1.3.0);
+- `with_calibration` gets a negative uncertainty, or a fit that
+  already includes one;
 - the fitted threshold is indistinguishable from the smallest
   coupling: the data do not reach the onset;
 - the fitted points span less than `min_decade` decades of `eps`
@@ -604,9 +715,10 @@ gives its inputs and conventions.
   identified), clearly below 1/2 (no kernel gives that; the fit has
   probably left the near-threshold range), or not positive;
 - a planned measurement has fewer than 3 points (6 with the threshold
-  fitted, as `fit_branch` needs), a non-positive or reversed range, a
-  non-positive scatter or `beta`, a non-positive target, or would need
-  more than 10^7 points;
+  fitted, as `fit_branch` needs), a number of points that is not a
+  whole number, a non-positive or reversed range, a non-positive
+  scatter or `beta`, a non-positive target, or would need more than
+  10^7 points;
 - `extract_beta` meets a point with `eps <= 0`: the branch is at or
   below the threshold there, because it bends back (a first-order
   onset, example 8) or is flat (`R` jumps at the threshold), and there
@@ -617,11 +729,17 @@ gives its inputs and conventions.
 - `fold_interval` finds a fold on a line with compact support (`box`),
   which it cannot refine, or cannot bracket a turning point on its
   grid;
-- `power_tail(s)` is asked for `s <= 1` (the kernel mass would be
-  infinite), or `heterogeneous` for `gamma <= 2` or a resulting tail
-  `s <= 1`;
+- `power_tail(s)` or `predicted_beta(s)` is asked for `s <= 1` (the
+  kernel mass would be infinite), or `heterogeneous` for `gamma <= 2`,
+  a non-positive `eta` or `k_min`, or a resulting tail `s <= 1`;
+- a line shape is given a width that is not finite and positive;
 - `tail_integral` is asked for `s` outside `1 < s < 3`, where it
   diverges;
+- `amplitude_general` is asked for a kernel without a tail in
+  `1 < s < 3`, or (new in 1.3.0) its default tail amplitude `C`, read
+  off the kernel at `|u| = 10^6`, differs by more than a relative 1e-6
+  from the value at `10^9` (pass `C` yourself then);
+- `class_exact` gets class populations that are not whole numbers;
 - a line shape without a floating-point distribution
   (`bimodal_gaussian`) is asked for `cdf`, `ppf` or a class table;
 - the solver of the differential equations fails in `evolve` or
@@ -629,7 +747,7 @@ gives its inputs and conventions.
 
 ## How the results are checked
 
-97 automated tests run on every push and pull request, on Python 3.9
+128 automated tests run on every push and pull request, on Python 3.9
 to 3.14, and once more on Python 3.10 with the oldest NumPy (1.22.0),
 SciPy (1.8.0) and mpmath (1.2.1) the package allows. The numerical
 checks compare the package with something independent of it: a closed
@@ -690,6 +808,47 @@ forms evaluated separately from the package's integrals)
   1e-12; at 20 digits it matches `R/sqrt(eps)` at `Omega = 1e-6` to a
   relative 1e-10 for three kernel-line pairs, and to 2e-6 for `s = 4`.
 
+**New in 1.3.0** (15 digits unless stated; every reference is a closed
+form or a calculation done another way)
+
+- Kernel masses for slow tails, `power_tail(s)` with `s` = 1.05, 1.1,
+  1.25 and 1.5, against `2 (pi/s)/sin(pi/s)` to a relative 1e-14, and
+  1e-28 at 30 digits. The averaged Kuramoto kernel of example 6 with
+  `gamma` = 3.4, 3.8 and 4.4 against its mass
+  `(pi/2)(gamma-2)/(gamma-3)` to 1e-13. `second_moment` for `s` = 3.1,
+  3.25 and 3.5 against `2 (pi/s)/sin(3 pi/s)` to 1e-13.
+- For `s = 1.1` on a Lorentzian line the threshold equals
+  `s sin(pi/s)/4` to 1e-13, and `chiN/chiN_c - 1` on the branch equals
+  `eps` from its separate integral to 1e-10.
+- `tail_integral` against the closed forms on Lorentzian and Gaussian
+  lines of widths 0.001, 1 and 1000, for `s` from 1.1 to 2.99, to a
+  relative 1e-13 (and 1e-27 at 30 digits). `amplitude_general` against
+  its closed form on the Lorentzian line for `s` = 1.1, 1.5, 2.5 and
+  2.9, to 1e-12.
+- `amplitude_general` refuses the conservative kernel averaged over
+  coupling strengths, whose tail amplitude (a closed form, also checked
+  by quadrature) is not reached at `|u| = 10^6`, and accepts the
+  averaged Kuramoto kernel, whose tail is an exact power law (its
+  default `C` matches the closed form `(gamma-2) B(s/2, 3/2)/2` to give
+  the same amplitude to 1e-12).
+- `class_exact` matches `full_exact` (8 emitters, two sets of classes)
+  to 1e-10 in `R` and 1e-9 in `xi^2`, with the times in any order.
+- `fit_branch`: `chi2` matches the sum recomputed from the returned
+  parameters; over 300 seeded fits under the model the p-values pass a
+  Kolmogorov-Smirnov test for uniformity and `chi2` averages to `dof`
+  within four standard errors; on the exact conservative branch with
+  1 % noise, points up to `eps = 0.01` give `p > 0.05` and `beta`
+  within 3 error bars of 1, points up to `eps = 0.5` give
+  `p < 1e-10` and `beta` more than 10 error bars off.
+- With coupling noise of a tenth of `chi - chi_c` at the first point,
+  the error bars of `chi_c`, `beta` and `A` with `sigma_chi` match the
+  scatter of 300 seeded fits within 12 %, while without it `sigma_beta`
+  is more than 15 % too small. `sigma_chi = 0` gives exactly the plain
+  fit. A fit refuses data generated with `beta` = 0.02, 0.04 and 25.
+- Refitting data with all couplings scaled by 1.07 scales `chi_c` by
+  1.07 to 1e-9 and leaves `beta` and `A` unchanged to 1e-7; scaling `R`
+  scales only `A`. `with_calibration` adds in quadrature to 1e-12.
+
 **The exponent rule** (25 digits, Gaussian line, `Omega` down to 1e-6)
 
 - `beta = 1/(s-1)` or 1/2 for the kernel family with `s` = 1.5, 1.8,
@@ -748,10 +907,44 @@ forms evaluated separately from the package's integrals)
   within 5e-3 for couplings `r` = 1.2, 2 and 3 times the threshold,
   and stays below 0.05 at 0.6 times the threshold.
 
-Not covered by tests: `class_exact`, `physicality` and
-`valid_window`.
+Not covered by tests: `physicality` and `valid_window`.
 
 ## Corrections in earlier versions
+
+**1.3.0 fixed five silent errors.** Numbers are at mpmath's default 15
+digits unless stated.
+
+- `Kernel.mass()` integrated a slow tail directly out to infinity. For
+  `power_tail(1.1)` the mass was 20.0312 instead of 20.2745 (1.2 % low;
+  3.7e-4 at 30 digits), so the threshold on a Lorentzian line of FWHM 1
+  was 0.0784174 instead of 0.0774765, and did not match the branch's own
+  `eps`. `second_moment()` had the same problem just above `s = 3`
+  (19.7910 instead of 20.0343 for `s = 3.1`). The tail is now mapped
+  onto a finite interval, as `G(Omega)` already was, and both match
+  their closed forms to the working precision.
+- `tail_integral` integrated a singularity `delta^(2-s)` at the center
+  directly. On a Lorentzian line of FWHM 1, `I_s` was 47.063 instead
+  of 47.715 at `s = 2.9` and 86.97 instead of 98.49 at `s = 2.95`. A
+  change of variables now removes the singularity.
+- Through these two, `amplitude_general` was wrong at the edges of
+  `1 < s < 3`, where the power `1/(s-1)` amplifies errors: on a
+  Gaussian line 8.4219 instead of 9.6179 for `s = 1.1`, and 0.45574
+  instead of 0.45258 for `s = 2.9`. Its default tail amplitude was also
+  used without a check: for the conservative kernel averaged over
+  coupling strengths (`gamma = 3.8`) it was 6.2 % low, and the
+  amplitude 8.3 % high. It now refuses such a kernel unless `C` is
+  given.
+- `fit_branch` returned the limit of its search as the exponent when
+  the best fit lay beyond it: for `R = 0.8 eps^0.04` it reported
+  `beta = 0.0500 +- 0.0040`, and for `eps^25`, `beta = 20 +- 1.5`. It
+  now refuses.
+- `class_exact` skipped a time earlier than the one before it and
+  returned the later state: for times `[1.0, 0.2]` (the system of
+  example 9) both entries gave `R = 0.677579`; the right value at
+  `t = 0.2` is 0.984316. It now accepts times in any order.
+
+All earlier tests pass unchanged, and examples 1 to 9 print the same
+as with 1.2.0.
 
 **1.2.0 fixed four silent inaccuracies.** Numbers below are at
 mpmath's default 15 digits unless stated.
@@ -838,10 +1031,17 @@ CI did not run Python 3.10. The full history is in
   It needs a differentiable line. It costs `n` plus about 40
   high-precision integrals (about 17 s at the default `n = 400` on the
   two-peaked line).
-- `Kernel.mass()` integrates slow tails numerically: for
-  `power_tail(1.5)` it is about 2e-10 (relative) off at 15 digits and
-  5e-18 at 30. This enters `threshold` (not `eps`, whose integral
-  treats the tail separately).
+- `fit_branch` propagates coupling errors `sigma_chi` to first order.
+  The tests check this at a tenth of `chi - chi_c`, and hand checks
+  with 1000 seeded fits held to within 6 % up to three tenths. It is
+  refused above a quarter.
+- `with_calibration` treats calibration as one scale factor for all
+  couplings and one for all `R`. An offset (a zero error) is not a
+  scale: it changes `eps` and so the exponent, and is not covered.
+- The default tail amplitude of `amplitude_general` is read off the
+  kernel at `|u| = 10^6`; for `power_tail(s)` it is low by a relative
+  `10^(-6 s)`, which the power `1/(s-1)` multiplies (2.5e-6 in `A` for
+  `s = 1.1`). Pass `C` for more digits.
 - `build_system`'s docstring refers to a convergence check in
   `scripts/vlasov_check.py`; that script belongs to the research
   repository and is not part of this package.
@@ -857,8 +1057,9 @@ whose scripts, archived run records and figures remain with the
 study. The core modules were carried over unchanged in v1.1.0 (1.1.1
 changes only `c_coefficient`; 1.2.0 changes how `G`, `eps` and the
 fold are computed, and adds `amplitude_curvature` and
-`Kernel.second_moment`); the `measured` module and the packaging are
-new here. Copyright as in [NOTICE](NOTICE).
+`Kernel.second_moment`; 1.3.0 changes how the kernel mass, the second
+moment and `tail_integral` are integrated, and how `class_exact` steps
+through time); the `measured` module and the packaging are new here. Copyright as in [NOTICE](NOTICE).
 
 ## Citing, support and license
 
