@@ -274,3 +274,185 @@ def test_amplitude_curvature_refusals():
         P.amplitude_curvature(L.bimodal_gaussian(4.0), K.kuramoto())  # dip
     with pytest.raises(ValueError, match="diverges"):
         P.amplitude_curvature(L.gaussian(1.0), K.conservative())   # s = 2
+
+
+# ---------------------------------------------------------------------------
+# New in 1.3.0: slow algebraic tails and the edges of the window 1 < s < 3.
+# References: int_0^inf du/(1+u^s) = (pi/s)/sin(pi/s) and
+# int_0^inf u^2 du/(1+u^s) = (pi/s)/sin(3 pi/s) (Beta-function integrals),
+# and closed forms of I_s derived in the docstrings below.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("dps,tol", [(15, "1e-14"), (30, "1e-28")])
+def test_mass_of_slow_tails(dps, tol):
+    """1.2.0 integrated the tail directly: power_tail(1.1).mass() was
+    1.2 % (15 digits) and 3.7e-4 (30 digits) too small, and so the
+    threshold too large."""
+    with mp.workdps(dps):
+        for s in ("1.05", "1.1", "1.25", "1.5"):
+            s = mp.mpf(s)
+            want = 2 * (mp.pi / s) / mp.sin(mp.pi / s)
+            assert abs(K.power_tail(s).mass() / want - 1) < mp.mpf(tol)
+
+
+def test_threshold_of_a_slow_tail_matches_the_branch():
+    """Lorentzian line of FWHM 1 (p(0) = 2/pi), W = 1/(1+|u|^1.1): the
+    threshold is s sin(pi/s)/4, and chiN/chiN_c - 1 on the branch equals
+    eps from the separate difference integral.  1.2.0 at 15 digits:
+    threshold 0.0784174 instead of 0.0774765, and chiN/chiN_c - 1 =
+    1.11102 against eps = 1.13666 at Omega = 1e-3."""
+    with mp.workdps(15):
+        s = mp.mpf("1.1")
+        line, kern = L.lorentzian(1.0), K.power_tail(s)
+        chi_c = P.threshold(line, kern)
+        assert abs(chi_c / (s * mp.sin(mp.pi / s) / 4) - 1) < mp.mpf("1e-13")
+        chiN, _, eps = P.branch_point(line, kern, mp.mpf("1e-3"))
+        assert abs((chiN / chi_c - 1) / eps - 1) < mp.mpf("1e-10")
+
+
+@pytest.mark.parametrize("gamma", [3.4, 3.8, 4.4])
+def test_heterogeneous_kuramoto_mass_closed_form(gamma):
+    """Averaging the Kuramoto kernel (mass pi/2) over P(k) ~ k^-gamma,
+    k >= 1, with field k^eta: int W(v/k^eta) dv = (pi/2) k^eta, so
+    m = (pi/2) (gamma-2)/(gamma-2-eta) for gamma > 2 + eta (eta = 1 here).
+    1.2.0 gave 1.4e-8 relative error at 15 digits for gamma = 3.4."""
+    with mp.workdps(15):
+        g = mp.mpf(gamma)
+        want = mp.pi / 2 * (g - 2) / (g - 3)
+        got = K.heterogeneous(K.kuramoto(), gamma).mass()
+        assert abs(got / want - 1) < mp.mpf("1e-13")
+
+
+def test_second_moment_of_slow_tails():
+    """s just above 3: u^2 W falls like u^-(s-2).  1.2.0 at 15 digits:
+    1.2 % too small for s = 3.1."""
+    with mp.workdps(15):
+        for s in ("3.1", "3.25", "3.5"):
+            s = mp.mpf(s)
+            want = 2 * (mp.pi / s) / mp.sin(3 * mp.pi / s)
+            got = K.power_tail(s).second_moment()
+            assert abs(got / want - 1) < mp.mpf("1e-13")
+
+
+def _I_lorentzian(fwhm, s):
+    """I_s on a Lorentzian of half width g: p(0) - p(d) = d^2/(pi g (d^2+g^2)),
+    and int_0^inf x^(a-1)/(1+x^2) dx = pi/(2 sin(pi a/2)) with a = 3-s,
+    so I_s = g^-s / sin(pi (3-s)/2)."""
+    g = mp.mpf(fwhm) / 2
+    return g ** -s / mp.sin(mp.pi * (3 - s) / 2)
+
+
+def _I_gaussian(fwhm, s):
+    """I_s on a Gaussian of standard deviation sig: with y = d^2/(2 sig^2)
+    and int_0^inf (1-e^-y) y^(-a-1) dy = Gamma(1-a)/a, a = (s-1)/2,
+    I_s = 2 p(0) sig^(1-s) 2^(-(s+1)/2) Gamma((3-s)/2) 2/(s-1)."""
+    sig = mp.mpf(fwhm) / (2 * mp.sqrt(2 * mp.log(2)))
+    p0 = 1 / (sig * mp.sqrt(2 * mp.pi))
+    return (2 * p0 * sig ** (1 - s) * mp.mpf(2) ** (-(s + 1) / 2)
+            * mp.gamma((3 - s) / 2) * 2 / (s - 1))
+
+
+@pytest.mark.parametrize("fwhm", [1.0, 1000.0, 0.001])
+def test_tail_integral_closed_forms(fwhm):
+    """1.2.0 integrated the singularity d^(2-s) at the origin directly: on
+    the Lorentzian line of FWHM 1 at 15 digits I_s was 1.4 % too small at
+    s = 2.9 and 12 % at s = 2.95 (4.5e-10 at s = 2.5)."""
+    with mp.workdps(15):
+        for s in ("1.1", "1.5", "2", "2.5", "2.9", "2.95", "2.99"):
+            s = mp.mpf(s)
+            got = P.tail_integral(L.lorentzian(fwhm), s)
+            assert abs(got / _I_lorentzian(fwhm, s) - 1) < mp.mpf("1e-13")
+            got = P.tail_integral(L.gaussian(fwhm), s)
+            assert abs(got / _I_gaussian(fwhm, s) - 1) < mp.mpf("1e-13")
+
+
+def test_tail_integral_at_30_digits():
+    with mp.workdps(30):
+        for s in ("1.1", "2.5", "2.95"):
+            s = mp.mpf(s)
+            got = P.tail_integral(L.gaussian(1.0), s)
+            assert abs(got / _I_gaussian(1.0, s) - 1) < mp.mpf("1e-27")
+
+
+def test_general_amplitude_tail_amplitude_check():
+    """The default C of amplitude_general is W(v) v^s at v = 1e6.
+
+    Conservative kernel averaged over P(k) ~ k^-3.8 (eta = 1): the tail is
+    C v^-1.8 with C = (gamma-2) int_0^inf q^(3-gamma)/(1+q^2) dq =
+    (gamma-2) pi / (2 sin(pi (4-gamma)/2)), approached only with a relative
+    correction of order v^-0.2; at v = 1e6 the estimate is 6 % low (1.2.0
+    used it silently, giving A 8.3 % high on a Gaussian line).  It is now
+    refused.  The Kuramoto average has an exact power-law tail above
+    v = 1, C = (gamma-2) B(s/2, 3/2) / 2, and is accepted."""
+    with mp.workdps(15):
+        g = mp.mpf(3.8)
+        a = 4 - g
+        C_closed = (g - 2) * mp.pi / (2 * mp.sin(mp.pi * a / 2))
+        # the integral itself, by quadrature in variables that remove the
+        # endpoint singularity (q = t^(1/a) on [0, 1], q = 1/p beyond)
+        near = mp.quad(lambda t: 1 / (a * (1 + t ** (2 / a))), [0, 1])
+        far = mp.quad(lambda p: p ** (1 - a) / (1 + p ** 2), [0, 1])
+        assert abs((g - 2) * (near + far) / C_closed - 1) < mp.mpf("1e-13")
+        het = K.heterogeneous(K.conservative(), 3.8)
+        v = mp.mpf(10) ** 6
+        assert abs(het.W(v) * v ** het.tail / C_closed - 1) > 0.05
+        with pytest.raises(ValueError, match="not converged"):
+            P.amplitude_general(L.gaussian(1.0), het)
+
+        het_k = K.heterogeneous(K.kuramoto(), 3.8)
+        s = mp.mpf(het_k.tail)
+        C_k = (g - 2) * mp.beta(s / 2, mp.mpf(3) / 2) / 2
+        line = L.gaussian(1.0)
+        A_default = P.amplitude_general(line, het_k)
+        A_closed = P.amplitude_general(line, het_k, C=C_k)
+        assert abs(A_default / A_closed - 1) < mp.mpf("1e-12")
+
+
+@pytest.mark.parametrize("s", ["1.1", "1.5", "2.5", "2.9"])
+def test_general_amplitude_closed_form_on_a_lorentzian(s):
+    """A_s = p(0) m [p(0) m / (C I_s)]^(1/(s-1)) with every piece in closed
+    form for W = 1/(1+|u|^s) (C = 1) on a Lorentzian line of half width 1/2:
+    p(0) = 2/pi, m = 2 (pi/s)/sin(pi/s), I_s from _I_lorentzian.  The power
+    1/(s-1) amplifies errors: on a Gaussian line at 15 digits, 1.2.0 gave
+    8.4219 instead of 9.6179 for s = 1.1 (from the mass) and 0.45574
+    instead of 0.45258 for s = 2.9 (from I_s)."""
+    with mp.workdps(15):
+        s = mp.mpf(s)
+        p0m = 2 / mp.pi * 2 * (mp.pi / s) / mp.sin(mp.pi / s)
+        want = p0m * (p0m / _I_lorentzian(1.0, s)) ** (1 / (s - 1))
+        line, kern = L.lorentzian(1.0), K.power_tail(s)
+        assert abs(P.amplitude_general(line, kern, C=1) / want - 1) < mp.mpf("1e-12")
+        # the default C = W(1e6) 1e6^s = 1/(1 + 1e6^-s) is 1e-6^s low
+        assert abs(P.amplitude_general(line, kern) / want - 1) < mp.mpf("1e-5")
+
+
+def test_general_amplitude_refusals():
+    with pytest.raises(ValueError, match="algebraic tail"):
+        P.amplitude_general(L.gaussian(1.0), K.kuramoto())
+    with pytest.raises(ValueError, match="algebraic tail"):
+        P.amplitude_general(L.gaussian(1.0), K.power_tail(4.0))
+    with pytest.raises(ValueError, match="positive"):
+        P.amplitude_general(L.gaussian(1.0), K.power_tail(2.5), C=-1)
+
+
+def test_input_checks_of_lines_and_kernels():
+    for bad in (0.0, -1.0, float("nan"), float("inf")):
+        with pytest.raises(ValueError, match="positive"):
+            L.lorentzian(bad)
+        with pytest.raises(ValueError, match="positive"):
+            L.gaussian(bad)
+        with pytest.raises(ValueError, match="positive"):
+            L.box(bad)
+    with pytest.raises(ValueError, match="positive"):
+        L.student_t(-3.0)
+    with pytest.raises(ValueError, match="positive"):
+        L.bimodal_gaussian(4.0, width=0.0)
+    with pytest.raises(ValueError, match="finite"):
+        K.power_tail(float("nan"))
+    with pytest.raises(ValueError, match="positive"):
+        K.heterogeneous(K.kuramoto(), 3.8, eta=0.0)
+    with pytest.raises(ValueError, match="s > 1"):
+        K.predicted_beta(0.5)
+    assert K.predicted_beta(None) == 0.5
+    assert K.predicted_beta(float("inf")) == 0.5
+    assert K.predicted_beta(2.5) == 1 / 1.5

@@ -11,7 +11,7 @@ import pytest
 
 from lockkernel import (beta_relative_sigma, fit_branch,
                         kernel_tail_from_beta, plan_fit, points_for_beta,
-                        points_for_fit)
+                        points_for_fit, with_calibration)
 from lockkernel.kernels import conservative, power_tail, predicted_beta
 from lockkernel.lineshapes import lorentzian
 from lockkernel.parametric import sweep, threshold
@@ -129,7 +129,7 @@ def test_metadata_and_no_matplotlib():
          "print('matplotlib' in sys.modules)"],
         capture_output=True, text=True, check=True)
     version, has_mpl = out.stdout.split()
-    assert version == "1.2.0"
+    assert version == "1.3.0"
     assert has_mpl == "False"
 
 
@@ -247,3 +247,169 @@ def test_plan_fit_refusals():
         plan_fit(12, 1e-4, 1e-2, BETA, 0.0)
     with pytest.raises(ValueError, match="positive"):
         points_for_fit(0.0, 1e-4, 1e-2, BETA, SLOG)
+
+
+# ---------------------------------------------------------------------------
+# New in 1.3.0: exponent at the search limit, goodness of fit, coupling
+# errors, calibration scales, input checks
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("beta_true", [0.02, 0.04, 25.0])
+def test_fit_refuses_an_exponent_at_the_search_limit(beta_true):
+    """1.2.0 returned the search limit as the fitted exponent: for noiseless
+    R = 0.8 eps^0.04 (eps = 1e-4 .. 0.1) it reported beta = 0.0500 +-
+    0.0040, and for eps^25 beta = 20 +- 1.5."""
+    eps = np.geomspace(1e-4, 1e-1, 12)
+    with pytest.raises(ValueError, match="search limit"):
+        fit_branch(0.5 * (1 + eps), 0.8 * eps ** beta_true, REF)
+
+
+def test_goodness_of_fit():
+    """chi2 is the weighted sum of squared log residuals, recomputed here
+    from the returned parameters; p_value is its chi-square tail
+    probability.  Under the model the p-values of 300 seeded fits are
+    uniform and chi2 averages to dof; a branch that bends away from the
+    power law is flagged."""
+    from scipy import stats
+
+    chi, r = _power_law(1e-5, 1e-2, 12)
+    rng = np.random.default_rng(11)
+    pv, c2 = [], []
+    for k in range(300):
+        rn = r * np.exp(rng.normal(0.0, SLOG, r.size))
+        f = fit_branch(chi, rn, "seeded simulation", sigma_r=SLOG * rn)
+        if k == 0:
+            eps = chi / f.chi_c - 1
+            res = (np.log(f.amplitude) + f.beta * np.log(eps) - np.log(rn)) / SLOG
+            assert abs(f.chi2 / float(res @ res) - 1) < 1e-9
+            assert f.dof == 9
+            assert abs(f.p_value - stats.chi2.sf(f.chi2, 9)) < 1e-12
+        pv.append(f.p_value)
+        c2.append(f.chi2)
+    assert stats.kstest(pv, "uniform").pvalue > 0.01
+    # mean of 300 chi-square(9) draws: 9 +- sqrt(2*9/300) = 9 +- 0.245
+    assert abs(np.mean(c2) - 9) < 4 * np.sqrt(2 * 9 / 300)
+    # no sigma_r: the scatter sets the error scale, nothing to test
+    f = fit_branch(chi, r * np.exp(rng.normal(0.0, SLOG, r.size)), REF)
+    assert f.chi2 is None and f.p_value is None and f.dof == 9
+
+    # conservative kernel on a Lorentzian line of FWHM 1: chi_c = 1/2 and
+    # R = eps/(1+eps) exactly.  1 % noise, 14 points from eps = 1e-4.
+    def bent(eps_max):
+        eps = np.geomspace(1e-4, eps_max, 14)
+        rn = eps / (1 + eps) * np.exp(np.random.default_rng(4).normal(
+            0.0, 0.01, 14))
+        return fit_branch(0.5 * (1 + eps), rn, REF, sigma_r=0.01 * rn)
+    near, far = bent(1e-2), bent(0.5)
+    assert near.p_value > 0.05 and abs(near.beta - 1) < 3 * near.sigma_beta
+    assert far.p_value < 1e-10 and abs(far.beta - 1) > 10 * far.sigma_beta
+
+
+def test_coupling_errors_against_seeded_fits():
+    """Coupling noise of fixed size, 0.1 of chi - chi_c at the first point
+    (the true coupling scatters about the recorded one).  With sigma_chi
+    the reported error bars match the scatter of 300 seeded fits within
+    12 % (the standard error of a 300-sample scatter is about 4 %);
+    without it sigma_beta comes out more than 15 % too small (about 23 %
+    here), and the chi-square test flags the misfit."""
+    eps = np.geomspace(1e-4, 1e-1, 14)
+    chi = CHI_C * (1 + eps)
+    sx = np.full(chi.size, 0.1 * (chi[0] - CHI_C))
+    rng = np.random.default_rng(9)
+    got = []
+    for _ in range(300):
+        x_true = chi + rng.normal(0.0, 1.0, chi.size) * sx
+        rn = AMP * (x_true / CHI_C - 1) ** BETA * np.exp(
+            rng.normal(0.0, SLOG, chi.size))
+        f = fit_branch(chi, rn, "seeded simulation", sigma_r=SLOG * rn,
+                       sigma_chi=sx)
+        f0 = fit_branch(chi, rn, "seeded simulation", sigma_r=SLOG * rn)
+        assert f.sigma_chi_used and not f0.sigma_chi_used
+        got.append((f.chi_c, f.beta, f.amplitude, f.sigma_chi_c, f.sigma_beta,
+                    f.sigma_amplitude, f0.sigma_beta, f.p_value, f0.p_value))
+    g = np.array(got)
+    scatter = g[:, :3].std(axis=0, ddof=1)
+    for k in range(3):
+        assert abs(np.median(g[:, 3 + k]) / scatter[k] - 1) < 0.12
+    assert abs(g[:, 1].mean() - BETA) < 3 * scatter[1] / np.sqrt(300)
+    assert np.median(g[:, 6]) < 0.85 * scatter[1]
+    assert np.median(g[:, 8]) < 0.01 < np.median(g[:, 7])
+
+
+def test_coupling_errors_reduce_to_the_plain_fit():
+    """sigma_chi = 0 adds nothing: the result is the plain weighted fit."""
+    chi, r = _power_law(1e-6, 1e-2, 12)
+    rn = r * np.exp(np.random.default_rng(3).normal(0.0, SLOG, r.size))
+    a = fit_branch(chi, rn, REF, sigma_r=SLOG * rn)
+    b = fit_branch(chi, rn, REF, sigma_r=SLOG * rn, sigma_chi=np.zeros(12))
+    for name in ("chi_c", "beta", "amplitude", "sigma_chi_c", "sigma_beta",
+                 "sigma_amplitude", "chi2"):
+        assert getattr(a, name) == getattr(b, name)
+
+
+def test_coupling_error_refusals():
+    chi, r = _power_law(1e-4, 1e-1, 12)
+    with pytest.raises(ValueError, match="needs sigma_r"):
+        fit_branch(chi, r, REF, sigma_chi=np.full(12, 1e-6))
+    with pytest.raises(ValueError, match=">= 0"):
+        fit_branch(chi, r, REF, sigma_r=SLOG * r, sigma_chi=np.full(12, -1e-6))
+    # sigma_chi = 0.5 (chi - chi_c) at the first point: first order fails
+    with pytest.raises(ValueError, match="not small"):
+        fit_branch(chi, r, REF, sigma_r=SLOG * r,
+                   sigma_chi=np.full(12, 0.5 * (chi[0] - CHI_C)))
+
+
+def test_calibration_scales_are_exact_and_added_in_quadrature():
+    """Scaling every coupling by k scales the fitted chi_c by k and leaves
+    beta and A unchanged; scaling R by k scales A only.  Checked by
+    refitting scaled data, then the quadrature sums of with_calibration."""
+    chi, r = _power_law(1e-5, 1e-2, 12)
+    rn = r * np.exp(np.random.default_rng(5).normal(0.0, SLOG, r.size))
+    f = fit_branch(chi, rn, REF, sigma_r=SLOG * rn)
+    k = 1.07
+    fx = fit_branch(k * chi, rn, REF, sigma_r=SLOG * rn)
+    fr = fit_branch(chi, k * rn, REF, sigma_r=SLOG * k * rn)
+    assert abs(fx.chi_c / (k * f.chi_c) - 1) < 1e-9
+    assert abs(fx.beta - f.beta) < 1e-7 and abs(fx.amplitude / f.amplitude - 1) < 1e-7
+    assert abs(fr.amplitude / (k * f.amplitude) - 1) < 1e-7
+    assert abs(fr.beta - f.beta) < 1e-7 and abs(fr.chi_c / f.chi_c - 1) < 1e-9
+
+    c = with_calibration(f, chi_scale_rel=0.02, r_scale_rel=0.05)
+    assert c.sigma_chi_c == pytest.approx(np.sqrt(f.sigma_chi_c ** 2
+                                                  + (0.02 * f.chi_c) ** 2), rel=1e-12)
+    assert c.sigma_amplitude == pytest.approx(np.sqrt(f.sigma_amplitude ** 2
+                                                      + (0.05 * f.amplitude) ** 2), rel=1e-12)
+    assert (c.chi_c, c.beta, c.amplitude, c.sigma_beta) == \
+        (f.chi_c, f.beta, f.amplitude, f.sigma_beta)
+    assert c.calibration_rel == (0.02, 0.05)
+    assert with_calibration(f) == dataclasses_replace(f)
+    with pytest.raises(ValueError, match="already"):
+        with_calibration(c, chi_scale_rel=0.01)
+    with pytest.raises(ValueError, match=">= 0"):
+        with_calibration(f, chi_scale_rel=-0.01)
+
+
+def dataclasses_replace(f):
+    import dataclasses
+    return dataclasses.replace(f)
+
+
+def test_input_checks_of_the_lab_half():
+    chi, r = _power_law(1e-4, 1e-1, 12)
+    with pytest.raises(ValueError, match="positive"):
+        fit_branch(chi - 1.0, r, REF)
+    with pytest.raises(ValueError, match="one-dimensional"):
+        fit_branch(np.stack([chi, chi]), np.stack([r, r]), REF)
+    with pytest.raises(ValueError, match="sigma_r"):
+        fit_branch(chi, r, REF, sigma_r=np.full(12, np.nan))
+    with pytest.raises(ValueError, match="integer"):
+        beta_relative_sigma(12.9, 2.0, 0.05)
+    assert beta_relative_sigma(12.0, 2.0, 0.05) == beta_relative_sigma(12, 2.0, 0.05)
+    with pytest.raises(ValueError, match="finite"):
+        beta_relative_sigma(12, np.inf, 0.05)
+    with pytest.raises(ValueError, match="integer"):
+        plan_fit(12.5, 1e-4, 1e-2, BETA, SLOG)
+    with pytest.raises(ValueError, match="sigma_beta"):
+        kernel_tail_from_beta(1.0, float("nan"))
+    with pytest.raises(ValueError, match="n_sigma"):
+        kernel_tail_from_beta(1.0, 0.02, n_sigma=-1.0)

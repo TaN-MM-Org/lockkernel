@@ -118,3 +118,50 @@ def test_structural_symmetries_of_the_equations():
     assert np.abs(d.Q - d.Q.T).max() < 1e-12 * scale
     assert np.abs(d.Z - d.Z.T).max() < 1e-12 * scale
     assert np.abs(d.Z.imag).max() < 1e-12 * scale
+
+
+# ---------------------------------------------------------------------------
+# New in 1.3.0: class_exact, which had no test
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("deltas", [
+    [-1.0, -1.0, -0.3, -0.3, 0.3, 0.3, 1.0, 1.0],
+    [-1.2, -0.4, -0.4, -0.4, 0.4, 0.9, 0.9, 1.2],      # unequal classes
+])
+def test_class_exact_against_full_diagonalisation(deltas):
+    """Emitters grouped by detuning stay in their classes' maximal spin
+    manifolds, so class_exact must reproduce the full 2^N calculation."""
+    from lockkernel.exact import class_exact
+
+    deltas = np.array(deltas, float)
+    times = np.array([0.05, 0.2, 1.0, 3.0])
+    u, cnt = np.unique(deltas, return_counts=True)
+    co_c, xi_c = class_exact(u, cnt, 1.5, times)
+    co_e, xi_e = full_exact(deltas, 1.5, times)
+    assert np.max(np.abs(co_c - co_e)) < 1e-10
+    assert np.max(np.abs(xi_c - xi_e)) < 1e-9
+
+
+def test_class_exact_times_in_any_order():
+    """1.2.0 skipped a time earlier than the one before it and returned the
+    later state: for times [1.0, 0.2] both entries were R = 0.677579, where
+    full diagonalization gives 0.984316 at t = 0.2."""
+    from lockkernel.exact import class_exact
+
+    deltas = np.array([-1.0, -1.0, -0.3, -0.3, 0.3, 0.3, 1.0, 1.0])
+    u, cnt = np.unique(deltas, return_counts=True)
+    times = np.array([1.0, 0.2, 0.0, 0.5, 0.5])
+    co_c, xi_c = class_exact(u, cnt, 1.5, times)
+    co_e, xi_e = full_exact(deltas, 1.5, times)
+    assert np.max(np.abs(co_c - co_e)) < 1e-10
+    assert np.max(np.abs(xi_c - xi_e)) < 1e-9
+    assert abs(co_c[2] - 1.0) < 1e-12           # t = 0 is the start
+
+
+def test_class_exact_refusals():
+    from lockkernel.exact import class_exact
+
+    with pytest.raises(ValueError, match="whole numbers"):
+        class_exact([0.0, 1.0], [2.5, 2.0], 1.0, [0.1])
+    with pytest.raises(ValueError, match="equal length"):
+        class_exact([0.0, 1.0], [2, 2, 2], 1.0, [0.1])
