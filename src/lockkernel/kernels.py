@@ -31,7 +31,7 @@ is what the universality line is tested against.
 from __future__ import annotations
 
 import dataclasses
-from typing import Callable
+from typing import Callable, Optional
 
 import mpmath as mp
 
@@ -64,10 +64,18 @@ class Kernel:
         return self.W(u)
 
     def mass(self) -> mp.mpf:
-        """m = int W(u) du, which fixes the threshold coupling."""
+        """m = int W(u) du, which fixes the threshold coupling.
+
+        For an algebraic tail W ~ |u|^-s the part beyond u = 1000 is mapped
+        onto (0, 1] so that the slow tail becomes a smooth integrand (see
+        `_algebraic_quad`).  Before 1.3.0 it was integrated directly, which
+        for `power_tail(1.1)` left the mass 1.2 % too small at 15 digits.
+        """
         if self.support is not None:
             return 2 * mp.quad(self.W, [0, self.support])
-        # A slowly decaying tail needs the decades resolved explicitly.
+        if self.tail is not None:
+            return 2 * _algebraic_quad(self.W, self.tail)
+        # faster than algebraic decay: the decades resolved explicitly
         return 2 * mp.quad(self.W, [0, 1, 10, 100, 1000, mp.inf])
 
     def second_moment(self) -> mp.mpf:
@@ -77,7 +85,10 @@ class Kernel:
         the amplitude of the beta = 1/2 class (see
         `lockkernel.parametric.amplitude_curvature`).  It is finite only for
         compact support, faster than algebraic decay, or a tail s > 3;
-        a kernel with tail s <= 3 is refused.
+        a kernel with tail s <= 3 is refused.  For a tail the integrand
+        u^2 W(u) falls like |u|^-(s-2), which is slow just above s = 3; it
+        is integrated as in `mass` (before 1.3.0, `power_tail(3.1)` came out
+        1.2 % too small at 15 digits).
         """
         if self.support is not None:
             return 2 * mp.quad(lambda u: u ** 2 * self.W(u), [0, self.support])
@@ -85,8 +96,31 @@ class Kernel:
             raise ValueError(
                 f"the second moment of a kernel with tail s = {self.tail:g} "
                 "diverges (it converges only for s > 3)")
+        if self.tail is not None:
+            return 2 * _algebraic_quad(lambda u: u ** 2 * self.W(u),
+                                       self.tail - 2)
         return 2 * mp.quad(lambda u: u ** 2 * self.W(u),
                            [0, 1, 10, 100, 1000, mp.inf])
+
+
+def _algebraic_quad(f, s, X=1000):
+    """int_0^inf f(u) du for an integrand with an algebraic tail f ~ u^-s.
+
+    Up to u = 1 the integral is taken directly, from 1 to X in v = log(u)
+    (break points at 10 and 100), and the tail [X, inf) is mapped onto
+    (0, 1] by u = X t^(-k) with k = 1/(s-1), under which a tail u^-s
+    becomes a constant at t -> 0.  This is the substitution
+    `lockkernel.parametric` uses for G(Omega).  mpmath's own treatment of
+    [X, inf) converges badly when s is close to 1.
+    """
+    s = mp.mpf(s)
+    X = mp.mpf(X)
+    k = 1 / (s - 1)
+    v0 = mp.quad(f, [0, 1])
+    v1 = mp.quad(lambda w: f(mp.exp(w)) * mp.exp(w),
+                 [0, mp.log(10), mp.log(100), mp.log(X)])
+    v2 = mp.quad(lambda t: f(X * t ** -k) * k * X * t ** (-k - 1), [0, 1])
+    return v0 + v1 + v2
 
 
 def conservative() -> Kernel:
@@ -107,6 +141,8 @@ def kuramoto() -> Kernel:
 def power_tail(s: float) -> Kernel:
     """The test family W_s(u) = 1/(1+|u|^s).  Requires s > 1 for a finite mass."""
     s = mp.mpf(s)
+    if not mp.isfinite(s):
+        raise ValueError(f"power_tail needs a finite s, got {s}")
     if s <= 1:
         raise ValueError("power_tail needs s > 1 for the kernel mass to converge")
 
@@ -129,7 +165,7 @@ KERNELS = {
 }
 
 
-def predicted_beta(s) -> float:
+def predicted_beta(s: Optional[float]) -> float:
     """The order parameter exponent predicted for a kernel of tail exponent s.
 
     beta = 1/(s-1) for 1 < s < 3, and beta = 1/2 for s >= 3 or for a kernel
@@ -144,10 +180,19 @@ def predicted_beta(s) -> float:
     beta = 1/(s-1) for every s > 1 (so beta < 1/2 for s > 3), and a
     compactly supported kernel gives no power law at all (the order
     parameter jumps).  This function does not cover that case.
+
+    Refuses s <= 1 (and a non-finite s other than +inf): no kernel with a
+    finite mass has such a tail.
     """
-    if s is None or s >= 3:
+    if s is None:
         return 0.5
-    return 1.0 / (float(s) - 1.0)
+    s = float(s)
+    if s != s or s <= 1.0:
+        raise ValueError(f"tail exponent s = {s:g}: a kernel with a finite "
+                         "mass needs s > 1 (or None for no algebraic tail)")
+    if s >= 3:
+        return 0.5
+    return 1.0 / (s - 1.0)
 
 
 def heterogeneous(base: Kernel, degree_exponent: float, eta: float = 1.0,
@@ -187,6 +232,11 @@ def heterogeneous(base: Kernel, degree_exponent: float, eta: float = 1.0,
     g = mp.mpf(degree_exponent)
     eta = mp.mpf(eta)
     kmin = mp.mpf(k_min)
+    if not (mp.isfinite(g) and mp.isfinite(eta) and mp.isfinite(kmin)):
+        raise ValueError("degree_exponent, eta and k_min must be finite")
+    if not (eta > 0 and kmin > 0):
+        raise ValueError(f"eta and k_min must be positive (got eta = {eta}, "
+                         f"k_min = {kmin})")
     if g <= 2:
         raise ValueError("the mean weight diverges unless gamma > 2")
     s0 = mp.mpf(base.tail) if base.tail is not None else mp.inf

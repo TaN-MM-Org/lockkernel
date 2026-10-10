@@ -295,14 +295,42 @@ def tail_integral(line: LineShape, s) -> mp.mpf:
     which is the form used here: it removes the subtraction of two nearly
     equal numbers near the origin, where p(0) - p(delta) is a cancellation of
     order delta^2 that costs as many digits as the quadrature comes close.
+
+    Near the origin -p'(delta) ~ -p''(0) delta, so the integrand behaves
+    like delta^(2-s), an integrable singularity that becomes strong as s
+    approaches 3.  On [0, scale] the integral is therefore taken in t, with
+    delta = scale t^(1/(3-s)), which makes the integrand finite at t = 0.
+    p'(delta) is taken by mpmath's numerical differentiation with guard
+    digits (2 log10(scale/delta) + 10 more), and replaced by p''(0) delta
+    below delta = scale 10^-(dps/2 + 5), where the two agree to the
+    working precision.  Before 1.3.0 the singular integrand was integrated
+    directly: on a Lorentzian line I_s was 1.4 % too small at s = 2.9 and
+    12 % at s = 2.95 (15 digits).
     """
     s = mp.mpf(s)
-    if s <= 1 or s >= 3:
-        raise ValueError("I_s converges only for 1 < s < 3")
+    if not mp.isfinite(s) or s <= 1 or s >= 3:
+        raise ValueError(f"I_s converges only for 1 < s < 3 (got s = {s})")
     sc = mp.mpf(line.scale)
-    f = lambda d: d ** (1 - s) * (-mp.diff(line.pdf, d))
-    return (2 / (s - 1)) * (mp.quad(f, [0, sc])
-                            + mp.quad(f, [sc, 10 * sc, 100 * sc, INF]))
+    with mp.extradps(15):
+        pp0 = mp.diff(line.pdf, mp.mpf(0), 2)
+    small = mp.mpf(10) ** (-(mp.mp.dps // 2 + 5))
+
+    # In x = delta / scale the integrand is of order one whatever the width
+    # (mpmath's quadrature stops on an absolute error estimate), and
+    # I_s = (2/(s-1)) scale^(-s) int x^(1-s) q(x) dx, q(x) = -scale^2 p'(scale x).
+    def q(x):
+        if x < small:
+            return -pp0 * sc ** 3 * x
+        guard = 10 + int(mp.ceil(-2 * mp.log10(x))) if x < 1 else 10
+        with mp.extradps(guard):
+            v = -mp.diff(line.pdf, sc * x) * sc ** 2
+        return +v
+
+    m = 1 / (3 - s)
+    near = mp.quad(lambda t: t ** (m * (1 - s)) * q(t ** m) * m * t ** (m - 1),
+                   [0, 1])
+    far = mp.quad(lambda x: x ** (1 - s) * q(x), [1, 10, 100, INF])
+    return (2 / (s - 1)) * sc ** (-s) * (near + far)
 
 
 def amplitude_general(line: LineShape, kernel: Kernel, C=None) -> mp.mpf:
@@ -313,13 +341,37 @@ def amplitude_general(line: LineShape, kernel: Kernel, C=None) -> mp.mpf:
     with m the kernel mass and I_s the integral above.  It reduces to
     pi p(0)^2 / c at s = 2, where the exponent is one and the branch is
     linear.  `C` defaults to the tail amplitude measured from the kernel
-    itself, which is one for the family 1/(1+|u|^s).
+    itself, W(v) v^s at v = 10^6, which is one for the family 1/(1+|u|^s).
+
+    Since 1.3.0 that default is checked: W(v) v^s is also evaluated at
+    v = 10^9, and if the two differ by more than a relative 1e-6 the tail
+    has not reached its asymptotic power law at v = 10^6 and the call is
+    refused (pass `C` yourself).  Before, the unconverged value was used
+    silently: for `heterogeneous(conservative(), 3.8)`, whose tail
+    approaches C |u|^-1.8 only with a relative correction of order
+    |u|^-0.2, C came out 6.2 % low and A_s 8.3 % high on a Gaussian line.
+    Also refuses a kernel without a tail exponent in 1 < s < 3.
     """
+    if kernel.tail is None or not 1 < kernel.tail < 3:
+        raise ValueError(
+            f"amplitude_general needs a kernel with an algebraic tail "
+            f"1 < s < 3 (kernel {kernel.name!r} has tail {kernel.tail}); "
+            "use amplitude_curvature for the beta = 1/2 class")
     s = mp.mpf(kernel.tail)
-    m = kernel.mass()
     if C is None:
         v = mp.mpf(10) ** 6
         C = kernel.W(v) * v ** s
+        v2 = mp.mpf(10) ** 9
+        C2 = kernel.W(v2) * v2 ** s
+        if not abs(C / C2 - 1) <= mp.mpf("1e-6"):
+            raise ValueError(
+                f"the tail amplitude of kernel {kernel.name!r} has not "
+                f"converged: W(v) v^s = {mp.nstr(C, 8)} at v = 1e6 but "
+                f"{mp.nstr(C2, 8)} at v = 1e9 (s = {kernel.tail:g}). Pass "
+                "the asymptotic tail amplitude C explicitly")
+    elif not (mp.isfinite(mp.mpf(C)) and mp.mpf(C) > 0):
+        raise ValueError(f"the tail amplitude C must be positive, got {C}")
+    m = kernel.mass()
     p0m = line.p0() * m
     return p0m * (p0m / (mp.mpf(C) * tail_integral(line, s))) ** (1 / (s - 1))
 

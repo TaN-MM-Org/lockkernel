@@ -65,8 +65,15 @@ class LineShape:
         return self.frozen.ppf(q)
 
 
+def _positive(value, what: str) -> None:
+    v = mp.mpf(value)
+    if not (mp.isfinite(v) and v > 0):
+        raise ValueError(f"{what} must be finite and positive, got {value!r}")
+
+
 def lorentzian(fwhm: float = 1.0) -> LineShape:
     """Lorentzian of the given full width at half maximum."""
+    _positive(fwhm, "fwhm")
     g = mp.mpf(fwhm) / 2  # half width at half maximum
 
     def pdf(d):
@@ -79,6 +86,7 @@ def lorentzian(fwhm: float = 1.0) -> LineShape:
 
 def gaussian(fwhm: float = 1.0) -> LineShape:
     """Gaussian of the given full width at half maximum."""
+    _positive(fwhm, "fwhm")
     sig = mp.mpf(fwhm) / (2 * mp.sqrt(2 * mp.log(2)))
 
     def pdf(d):
@@ -91,6 +99,8 @@ def gaussian(fwhm: float = 1.0) -> LineShape:
 
 def student_t(nu: float = 3.0, scale: float = 1.0) -> LineShape:
     """Student t density, a heavy tailed line with p(d) ~ |d|^-(nu+1)."""
+    _positive(nu, "nu")
+    _positive(scale, "scale")
     nu = mp.mpf(nu)
     sc = mp.mpf(scale)
     norm = mp.gamma((nu + 1) / 2) / (mp.sqrt(nu * mp.pi) * mp.gamma(nu / 2) * sc)
@@ -105,6 +115,7 @@ def student_t(nu: float = 3.0, scale: float = 1.0) -> LineShape:
 
 def box(halfwidth: float = 1.0) -> LineShape:
     """Uniform line on [-w, w].  Discontinuous, kept as a stress test."""
+    _positive(halfwidth, "halfwidth")
     w = mp.mpf(halfwidth)
 
     def pdf(d):
@@ -121,6 +132,9 @@ def bimodal_gaussian(sep: float, width: float = 1.0) -> LineShape:
     The ratio sep/width controls the order of the transition; see
     `lockkernel.parametric.c_coefficient`.
     """
+    _positive(width, "width")
+    if not mp.isfinite(mp.mpf(sep)):
+        raise ValueError(f"sep must be finite, got {sep!r}")
     a = mp.mpf(sep) / 2
     s = mp.mpf(width)
 

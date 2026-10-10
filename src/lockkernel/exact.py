@@ -20,6 +20,7 @@ equations term by term.
 from __future__ import annotations
 
 import numpy as np
+from numpy.typing import ArrayLike
 
 __all__ = ["symmetric_exact", "full_exact"]
 
@@ -38,7 +39,7 @@ def _wineland_from_moments(J, Cov, N):
     return float(vals[0] * N / Jn ** 2)
 
 
-def symmetric_exact(N: int, chiN: float, times):
+def symmetric_exact(N: int, chiN: float, times: ArrayLike):
     """Exact contrast and Wineland parameter for a degenerate line.
 
     The state stays in the maximal spin manifold, of dimension N+1, and the
@@ -96,7 +97,7 @@ def _log_binom(n, k):
     return lgamma(n + 1) - lgamma(k + 1) - lgamma(n - k + 1)
 
 
-def full_exact(deltas, chiN: float, times):
+def full_exact(deltas: ArrayLike, chiN: float, times: ArrayLike):
     """Exact diagonalisation of the full Hamiltonian for a small ensemble.
 
     `deltas` lists the detuning of every individual emitter, so the emitter
@@ -157,7 +158,8 @@ def full_exact(deltas, chiN: float, times):
     return np.array(contrast), np.array(xi2)
 
 
-def class_exact(deltas, populations, chiN: float, times, tol=1e-9):
+def class_exact(deltas: ArrayLike, populations: ArrayLike, chiN: float,
+                times: ArrayLike, tol: float = 1e-9):
     """Exact dynamics of an inhomogeneous ensemble in the collective spin basis.
 
     Emitters within a class are exchange symmetric and start in a symmetric
@@ -168,6 +170,14 @@ def class_exact(deltas, populations, chiN: float, times, tol=1e-9):
     tens.  This is the reference that fixes how far the cumulant expansion can
     be trusted at finite N.
 
+    `deltas` are the class detunings and `populations` the (integer)
+    number of emitters in each class.  `times` may come in any order: each
+    state is propagated from the previous one, forwards or backwards (the
+    evolution is unitary).  Before 1.3.0 a time earlier than the one before
+    it was skipped, so the state of the LATER time was returned for it (for
+    times [1.0, 0.2] on the system of README example 9 both entries gave
+    R = 0.677579; the right value at t = 0.2 is 0.984316).
+
     Returns (contrast, xi2), each an array over `times`.
     """
     import numpy as _np
@@ -175,7 +185,18 @@ def class_exact(deltas, populations, chiN: float, times, tol=1e-9):
     from scipy.sparse.linalg import expm_multiply
 
     deltas = _np.asarray(deltas, float)
-    pops = _np.asarray(populations, int)
+    pops_f = _np.asarray(populations, float)
+    if deltas.ndim != 1 or pops_f.shape != deltas.shape:
+        raise ValueError("deltas and populations must be one-dimensional "
+                         "and of equal length (one entry per class)")
+    if _np.any(~_np.isfinite(deltas)) or not _np.isfinite(float(chiN)):
+        raise ValueError("deltas and chiN must be finite")
+    if _np.any(pops_f != _np.round(pops_f)) or _np.any(pops_f < 0) \
+            or pops_f.sum() < 1:
+        raise ValueError("populations must be whole numbers >= 0 (emitters "
+                         "per class, at least one in all); they used to be "
+                         "truncated silently")
+    pops = pops_f.astype(int)
     M = len(pops)
     N = int(pops.sum())
     chi1 = chiN / N
@@ -226,8 +247,8 @@ def class_exact(deltas, populations, chiN: float, times, tol=1e-9):
     contrast, xi2 = [], []
     prev = 0.0
     state = psi
-    for t in _np.atleast_1d(times):
-        if t > prev:
+    for t in _np.atleast_1d(_np.asarray(times, float)):
+        if t != prev:
             state = expm_multiply(-1j * (t - prev) * H, state)
             prev = t
         mean = _np.array([_np.vdot(state, A @ state).real for A in Js])
