@@ -12,6 +12,8 @@ DPS = {
     "test_meanfield": 20,
     "test_cumulant": 15,
     "test_onset": 15,
+    "test_kernels_and_lines": 15,
+    "test_branch_tools": 15,
 }
 
 
