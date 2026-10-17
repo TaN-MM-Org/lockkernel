@@ -79,7 +79,14 @@ def class_table(line: LineShape, M_core: int = 64, M_tail: int = 14,
     if free_beyond is None:
         s_d, s_n = np.zeros(0), np.zeros(0)
     else:
-        d_s, n_s = _log_bins(dist, tail_end, delta_max, M_spec, True)
+        # The free bins run from the free edge to delta_max, the last one
+        # holding everything beyond.  A free edge at or past delta_max
+        # (build_system puts it there for chiN above about 125 line
+        # widths) would reverse that range, and before 1.4.0 the last bin
+        # then counted the population between delta_max and the free edge
+        # a second time; the free bins now span one decade instead.
+        spec_hi = delta_max if delta_max > tail_end else 10.0 * tail_end
+        d_s, n_s = _log_bins(dist, tail_end, spec_hi, M_spec, True)
         s_d = np.concatenate([-d_s[::-1], d_s])
         s_n = np.concatenate([n_s[::-1], n_s])
 

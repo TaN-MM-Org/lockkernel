@@ -75,6 +75,9 @@ gives a fold in the branch and therefore a hysteretic, first order onset.
 """
 from __future__ import annotations
 
+import dataclasses
+from typing import List, Optional, Tuple
+
 import mpmath as mp
 
 from .kernels import Kernel, conservative
@@ -83,7 +86,8 @@ from .lineshapes import LineShape
 __all__ = ["G_of_Omega", "H_of_Omega", "branch_point", "threshold",
            "c_coefficient", "amplitude", "sweep", "extract_beta",
            "fold_interval", "tail_integral", "amplitude_general",
-           "amplitude_curvature"]
+           "amplitude_curvature", "local_exponent", "branch_at_eps",
+           "branch_at_coupling", "eps_window"]
 
 INF = mp.inf
 
@@ -97,10 +101,13 @@ def _half_points(line: LineShape, kernel: Kernel, Omega):
     and the line on u ~ scale/Omega.  Both are given to the quadrature.
     """
     s = mp.mpf(line.scale) / Omega
+    # kinks of the kernel (since 1.4.0; none for the shipped kernels)
+    kinks = {mp.mpf(b) for b in getattr(kernel, "breaks", ())}
     if kernel.support is not None:
         cut = mp.mpf(kernel.support)
-        return sorted({mp.mpf(0), min(s, cut), cut}), None, 1
-    pos = sorted({mp.mpf(0), mp.mpf(1), mp.mpf(10), s, 10 * s})
+        kinks = {b for b in kinks if b < cut}
+        return sorted({mp.mpf(0), min(s, cut), cut} | kinks), None, 1
+    pos = sorted({mp.mpf(0), mp.mpf(1), mp.mpf(10), s, 10 * s} | kinks)
     k = 1 / (mp.mpf(kernel.tail) - 1) if kernel.tail is not None else 1
     return pos, pos[-1], k
 
@@ -131,9 +138,23 @@ def _even_quad(f, pos, X, k=1):
     return 2 * (v + v1 + v2), 2 * (e + e1 + e2)
 
 
-def G_of_Omega(line: LineShape, kernel: Kernel, Omega) -> mp.mpf:
-    """G(Omega) = int p(Omega u) W(u) du.  Finite and positive at Omega = 0."""
+def _check_omega(Omega, zero_ok: bool = False) -> mp.mpf:
+    """Omega as an mpf; refuses a negative or non-finite value (since 1.4.0;
+    before, G_of_Omega(lorentzian(), conservative(), -0.1) returned twice
+    G(0.1) and branch_point raised TypeError)."""
     Omega = mp.mpf(Omega)
+    if not (mp.isfinite(Omega) and (Omega > 0 or (zero_ok and Omega == 0))):
+        raise ValueError(f"the locking bandwidth Omega must be finite and "
+                         f"{'>= 0' if zero_ok else 'positive'}, got {Omega}")
+    return Omega
+
+
+def G_of_Omega(line: LineShape, kernel: Kernel, Omega) -> mp.mpf:
+    """G(Omega) = int p(Omega u) W(u) du.  Finite and positive at Omega = 0.
+
+    Refuses a negative or non-finite Omega (since 1.4.0).
+    """
+    Omega = _check_omega(Omega, zero_ok=True)
     if Omega == 0:
         return line.p0() * kernel.mass()
     f = lambda u: line.pdf(Omega * u) * kernel.W(u)
@@ -142,12 +163,45 @@ def G_of_Omega(line: LineShape, kernel: Kernel, Omega) -> mp.mpf:
 
 def H_of_Omega(line: LineShape, kernel: Kernel, Omega) -> mp.mpf:
     """H(Omega) = Omega G(Omega).  Equals the order parameter on the branch."""
-    return mp.mpf(Omega) * G_of_Omega(line, kernel, Omega)
+    Omega = _check_omega(Omega, zero_ok=True)
+    return Omega * G_of_Omega(line, kernel, Omega)
 
 
 def threshold(line: LineShape, kernel: Kernel) -> mp.mpf:
     """chiN_c = 1 / (p(0) m).  The kernel enters only through its mass."""
     return 1 / (line.p0() * kernel.mass())
+
+
+def _memo_kernel(kernel: Kernel) -> Kernel:
+    """The same kernel, remembering W(u) for each (u, precision).
+
+    Since 1.4.0 `branch_point` and `sweep` (and the new branch tools)
+    evaluate the kernel through this: G(Omega) and the two passes of D(Omega) =
+    G(0) - G(Omega) put their quadrature nodes at the same u, and the
+    segments [0, 1] and [1, 10] have the same nodes for every Omega, so
+    each W(u) is computed once.  The values are the ones W returns, so the
+    results are bit for bit those of evaluating W anew each time (tested
+    against the 1.3.0 code); the gain is large for the coupling-averaged
+    kernels of `heterogeneous`, where each W(u) is itself a quadrature.
+    """
+    if getattr(kernel, "_memo", False):
+        return kernel
+    W, cache = kernel.W, {}
+
+    def Wm(u):
+        key = (u, mp.mp.prec)
+        try:
+            return cache[key]
+        except KeyError:
+            v = cache[key] = W(u)
+            return v
+        except TypeError:           # an unhashable argument
+            return W(u)
+
+    Wm._memo = True
+    out = dataclasses.replace(kernel, W=Wm)
+    object.__setattr__(out, "_memo", True)
+    return out
 
 
 def _G0_minus_G(line: LineShape, kernel: Kernel, Omega) -> mp.mpf:
@@ -173,10 +227,19 @@ def _G0_minus_G(line: LineShape, kernel: Kernel, Omega) -> mp.mpf:
     with mp.extradps(guard):
         p0 = line.p0()
 
+    seen = {}
+
     def f(u):
+        # the second pass below meets the nodes of the first again;
+        # remembering the values (since 1.4.0) saves about a third of the
+        # time of branch_point and changes no bit of the result
+        key = (u, mp.mp.prec)
+        if key in seen:
+            return seen[key]
         with mp.extradps(guard):
             d = p0 - line.pdf(Omega * u)
-        return (+d) * kernel.W(u)
+        v = seen[key] = (+d) * kernel.W(u)
+        return v
 
     pts = _half_points(line, kernel, Omega)
     val = _even_quad(f, *pts)[0]
@@ -186,16 +249,19 @@ def _G0_minus_G(line: LineShape, kernel: Kernel, Omega) -> mp.mpf:
     return size * _even_quad(lambda u: f(u) / size, *pts)[0]
 
 
-def branch_point(line: LineShape, kernel: Kernel, Omega):
+def branch_point(line: LineShape, kernel: Kernel,
+                 Omega) -> Tuple[mp.mpf, mp.mpf, mp.mpf]:
     """One point of the branch: (chiN, R, eps) at locking bandwidth Omega.
 
     chiN = 1/G(Omega), R = Omega G(Omega), and the reduced coupling
     eps = chiN/chiN_c - 1 is computed as [G(0) - G(Omega)] / G(Omega) from
     a direct integral of the difference, so it keeps the working precision
     however small it is (since 1.2.0; before, it lost about log10(1/eps)
-    digits to cancellation).
+    digits to cancellation).  Refuses a negative or non-finite Omega
+    (since 1.4.0).
     """
-    Omega = mp.mpf(Omega)
+    Omega = _check_omega(Omega, zero_ok=True)
+    kernel = _memo_kernel(kernel)
     G = G_of_Omega(line, kernel, Omega)
     chiN = 1 / G
     R = Omega * G
@@ -203,8 +269,10 @@ def branch_point(line: LineShape, kernel: Kernel, Omega):
     return chiN, R, eps
 
 
-def sweep(line: LineShape, kernel: Kernel, exponents):
+def sweep(line: LineShape, kernel: Kernel,
+          exponents) -> List[Tuple[mp.mpf, mp.mpf, mp.mpf]]:
     """The branch at Omega = 10^e for each e in `exponents`."""
+    kernel = _memo_kernel(kernel)
     return [branch_point(line, kernel, mp.mpf(10) ** mp.mpf(e)) for e in exponents]
 
 
@@ -511,3 +579,268 @@ def fold_interval(line: LineShape, kernel: Kernel = None, n: int = 400,
     return dict(chiN_lo=1 / G_lo, chiN_hi=1 / G_hi,
                 R_low=O_hi * G_hi, R_jump=R_jump, R_high_at_lo=O_lo * G_lo,
                 Omega_lo=O_lo, Omega_hi=O_hi, Omega_jump=O_jump)
+
+
+# ---------------------------------------------------------------------------
+# New in 1.4.0: the branch at a given coupling, and the local exponent
+# ---------------------------------------------------------------------------
+
+def _dG_dOmega_scaled(line: LineShape, kernel: Kernel, Omega) -> mp.mpf:
+    """dG/dOmega = int u p'(Omega u) W(u) du, to the working precision.
+
+    As `_dG_dOmega` (which `fold_interval` uses, unchanged), but with the
+    two refinements of `_G0_minus_G`: p' is taken with 2 log10(scale /
+    Omega) guard digits, because near the center of the line it is a
+    difference of nearly equal values, and the integral is repeated with
+    the integrand divided by its size, because mpmath's quadrature stops
+    on an absolute error estimate and dG/dOmega -> 0 at the threshold.
+    """
+    ratio = Omega / mp.mpf(line.scale)
+    guard = 10
+    if ratio < 1:
+        guard += int(mp.ceil(-2 * mp.log10(ratio)))
+    seen = {}
+
+    def f(u):
+        key = (u, mp.mp.prec)
+        if key not in seen:
+            with mp.extradps(guard):
+                d = mp.diff(line.pdf, Omega * u)
+            seen[key] = u * (+d) * kernel.W(u)
+        return seen[key]
+
+    pts = _half_points(line, kernel, Omega)
+    val = _even_quad(f, *pts)[0]
+    if val == 0:
+        return val
+    size = abs(val)
+    return size * _even_quad(lambda u: f(u) / size, *pts)[0]
+
+
+def local_exponent(line: LineShape, kernel: Kernel,
+                   Omega) -> Tuple[mp.mpf, mp.mpf]:
+    """The exact local exponent d log R / d log eps at one branch point.
+
+    Returns (eps, beta_local) at locking bandwidth Omega.  Near the
+    threshold beta_local tends to the exponent beta; how far up in eps it
+    stays close to beta is how far a power-law fit can reach before the
+    bend of the branch biases it (see `eps_window`).
+
+    With R = Omega G and eps = D / G, where D = G(0) - G (computed
+    without cancellation, as in `branch_point`) and G' = dG/dOmega =
+    int u p'(Omega u) W(u) du,
+
+        beta_local = -(G + Omega G') D / (Omega G' (G + D)),
+
+    exact, with no finite difference along the branch.  The tests hold it
+    to the closed forms 1/(1+eps) (conservative kernel, Lorentzian line,
+    where R = eps/(1+eps)), (1/2)/(1+eps) (Kuramoto kernel, Lorentzian
+    line, R = sqrt(eps/(1+eps))) and to the closed form of the
+    conservative branch on a Voigt line.
+
+    Needs a differentiable line: a line with compact support (`box`) is
+    refused, as is a point where G' >= 0 (there the branch is flat or
+    bends back, and R is not a rising function of eps).
+    """
+    Omega = _check_omega(Omega)
+    if line.compact_support is not None:
+        raise ValueError(
+            f"{line.name} has compact support (it is not differentiable at "
+            "its edge), and the local exponent is computed from p'; "
+            "use extract_beta for this line")
+    kernel = _memo_kernel(kernel)
+    G = G_of_Omega(line, kernel, Omega)
+    D = _G0_minus_G(line, kernel, Omega)
+    Gp = _dG_dOmega_scaled(line, kernel, Omega)
+    if not Gp < 0 or not D > 0:
+        raise ValueError(
+            f"dG/dOmega = {mp.nstr(Gp, 5)} and G(0) - G = {mp.nstr(D, 5)} "
+            f"at Omega = {mp.nstr(Omega, 5)}: the branch does not rise "
+            "here (it is flat or bends back; see fold_interval), so R is "
+            "not a power of eps")
+    return D / G, -(G + Omega * Gp) * D / (Omega * Gp * (G + D))
+
+
+def branch_at_eps(line: LineShape, kernel: Kernel, eps, max_iter: int = 60
+                  ) -> Tuple[mp.mpf, mp.mpf, mp.mpf, mp.mpf]:
+    """The branch point at a given reduced coupling eps = chiN/chiN_c - 1.
+
+    `branch_point` takes the locking bandwidth Omega and returns the
+    coupling; this is the inverse, for the question a lab asks: what R
+    will the system show at the coupling I set?  Returns
+    (chiN, R, eps, Omega), the exact branch point (as `branch_point`
+    gives it) at the Omega where the reduced coupling equals `eps` to
+    about the working precision.  Giving eps rather than chiN keeps the
+    precision close to the threshold; `branch_at_coupling` takes chiN.
+
+    Omega is found by a secant iteration on log eps against log Omega,
+    which is close to a straight line of slope s - 1 or 2 near the
+    threshold, falling back to bisection once the root is bracketed.
+
+    Assumes a continuous onset, where eps rises with Omega and the
+    solution is unique.  Refuses eps that is not finite and positive (at
+    or below the threshold the incoherent state R = 0 is a solution, and
+    on a first-order onset there are others; see `fold_interval`), and
+    raises ValueError when the iteration meets eps <= 0 (a branch that
+    bends back or is flat) or does not converge in `max_iter` steps.
+    """
+    eps = mp.mpf(eps)
+    if not (mp.isfinite(eps) and eps > 0):
+        raise ValueError(f"eps must be finite and positive (above the "
+                         f"threshold), got {eps}")
+    kernel = _memo_kernel(kernel)
+    target = mp.log(eps)
+    s = kernel.tail
+    p = mp.mpf(2) if s is None or s >= 3 else mp.mpf(s) - 1   # expected slope
+    last = {}
+
+    def f(L):
+        Om = mp.exp(L)
+        G = G_of_Omega(line, kernel, Om)
+        D = _G0_minus_G(line, kernel, Om)
+        if not D > 0:
+            raise ValueError(
+                f"eps = {mp.nstr(D / G, 5)} <= 0 at Omega = {mp.nstr(Om, 5)}"
+                ": the branch is at or below the threshold there (it bends "
+                "back, a first-order onset, or is flat); branch_at_eps "
+                "needs a continuous onset (see fold_interval)")
+        last[L] = (G, D, Om)
+        return mp.log(D / G) - target
+
+    tol = mp.ldexp(1, -mp.mp.prec + 8)
+    a = mp.log(mp.mpf(line.scale)) + target / p
+    fa = f(a)
+    b = a - fa / p
+    lo = hi = None                     # bracket: f(lo) < 0 < f(hi)
+    for _ in range(max_iter):
+        fb = f(b)
+        for x, fx in ((a, fa), (b, fb)):
+            if fx < 0 and (lo is None or x > lo):
+                lo = x
+            if fx > 0 and (hi is None or x < hi):
+                hi = x
+        if fb == 0 or abs(b - a) <= tol * (1 + abs(b)):
+            break
+        slope = (fb - fa) / (b - a)
+        if not slope > 0:
+            slope = p
+        x = b - fb / slope
+        if lo is not None and hi is not None and not lo < x < hi:
+            x = (lo + hi) / 2
+        a, fa, b = b, fb, x
+    else:
+        raise ValueError(f"branch_at_eps did not converge in {max_iter} "
+                         "steps")
+    G, D, Om = last[b]
+    if not abs(fb) <= mp.ldexp(1, -mp.mp.prec + 20):
+        raise ValueError(f"branch_at_eps stopped at eps = {mp.nstr(D / G, 8)}"
+                         f", not at the requested {mp.nstr(eps, 8)}")
+    return 1 / G, Om * G, D / G, Om
+
+
+def branch_at_coupling(line: LineShape, kernel: Kernel,
+                       chiN) -> Tuple[mp.mpf, mp.mpf, mp.mpf, mp.mpf]:
+    """The branch point at a given coupling chiN: (chiN, R, eps, Omega).
+
+    `branch_at_eps` with eps = chiN / chiN_c - 1 (the threshold from
+    `threshold`).  The returned chiN is that of the exact branch point
+    found, equal to the one asked for to about the working precision.
+    Very close to the threshold, forming eps from chiN loses about
+    log10(1/eps) digits; give eps to `branch_at_eps` there.  Refuses a
+    coupling that is not finite or not above the threshold.
+    """
+    chiN = mp.mpf(chiN)
+    if not mp.isfinite(chiN):
+        raise ValueError(f"chiN must be finite, got {chiN}")
+    chi_c = threshold(line, kernel)
+    if not chiN > chi_c:
+        raise ValueError(
+            f"chiN = {mp.nstr(chiN, 8)} is not above the threshold "
+            f"chiN_c = {mp.nstr(chi_c, 8)}: the incoherent state R = 0 is a "
+            "solution there (and, for a first-order onset, possibly a "
+            "synchronized one; see fold_interval)")
+    return branch_at_eps(line, kernel, chiN / chi_c - 1)
+
+
+def eps_window(line: LineShape, kernel: Kernel, rel_tol: float = 0.01,
+               beta: Optional[float] = None, lo: float = -8.0,
+               hi: float = 1.0) -> Tuple[mp.mpf, mp.mpf]:
+    """How far above the threshold the branch is still a power law.
+
+    Returns (eps_max, Omega_max): the reduced coupling (and locking
+    bandwidth) at which the local exponent d log R / d log eps first
+    differs from the onset exponent beta by `rel_tol` (relative).
+    Below eps_max the local slope of the branch is within rel_tol of
+    beta everywhere, so a power law fitted there is biased by less than
+    that; points above it bend the fit (README example 10).  A planning
+    tool: choose the range of couplings to measure from it, then the
+    number of points from `lockkernel.measured.plan_fit`.
+
+    `beta` defaults to `predicted_beta` of the kernel's tail (for a line
+    with a rounded center).  The local exponent (`local_exponent`) is
+    followed from Omega = 10^lo upwards in steps of half a decade; the
+    step where it leaves the band is refined by regula falsi (Illinois)
+    on log10 Omega to 1e-9.  Returns the end of the grid, 10^hi, if it
+    stays in the band all the way.  Refuses when it is already outside
+    the band at 10^lo (lower `lo`, or the expected beta is not the
+    exponent of this branch).  The tests check the closed forms
+    eps_max = rel_tol / (1 - rel_tol) for the conservative and the
+    Kuramoto kernel on a Lorentzian line, where the local exponent is
+    beta / (1 + eps).  Needs a differentiable line, as `local_exponent`.
+    """
+    from .kernels import predicted_beta
+    rel_tol = mp.mpf(rel_tol)
+    if not (mp.isfinite(rel_tol) and 0 < rel_tol < 1):
+        raise ValueError("rel_tol must be between 0 and 1")
+    if beta is None:
+        beta = predicted_beta(kernel.tail)
+    beta = mp.mpf(beta)
+    if not (mp.isfinite(beta) and beta > 0):
+        raise ValueError("beta must be finite and positive")
+    lo, hi = mp.mpf(lo), mp.mpf(hi)
+    if not (mp.isfinite(lo) and mp.isfinite(hi) and lo < hi):
+        raise ValueError("need lo < hi, both finite")
+    kernel = _memo_kernel(kernel)
+    eps_at = {}
+
+    def g(L):           # > 0 outside the band
+        e, b = local_exponent(line, kernel, mp.mpf(10) ** L)
+        eps_at[L] = e
+        return abs(b / beta - 1) - rel_tol
+
+    a, ga = lo, g(lo)
+    if ga > 0:
+        raise ValueError(
+            f"the local exponent at Omega = 10^{mp.nstr(lo, 4)} is already "
+            f"more than {mp.nstr(rel_tol, 3)} away from beta = "
+            f"{mp.nstr(beta, 6)}: lower lo, or check beta")
+    while True:
+        if a >= hi:
+            return eps_at[a], mp.mpf(10) ** a
+        b = min(a + mp.mpf(1) / 2, hi)
+        gb = g(b)
+        if gb > 0:
+            break
+        a, ga = b, gb
+    # Illinois: g(a) <= 0 < g(b)
+    side = 0
+    for _ in range(100):
+        if b - a <= mp.mpf("1e-9"):
+            break
+        m = b - gb * (b - a) / (gb - ga)
+        if not a < m < b:
+            m = (a + b) / 2
+        gm = g(m)
+        if gm > 0:
+            b, gb = m, gm
+            if side == 1:
+                ga /= 2
+            side = 1
+        else:
+            a, ga = m, gm
+            if side == -1:
+                gb /= 2
+            side = -1
+        if gm == 0:
+            break
+    return eps_at[a], mp.mpf(10) ** a

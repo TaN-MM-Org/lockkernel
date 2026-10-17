@@ -476,20 +476,39 @@ def points_for_beta(target_sigma_beta: float, decades: float,
 
     Exact inversion of `beta_relative_sigma`: returns (n, achieved)
     with achieved <= target and n-1 failing it (asserted two-sided in
-    the tests).
+    the tests).  Refuses a target that would need more than 10^7 points.
+
+    The error bar falls strictly as n grows (n (n+1)/(n-1) increases for
+    n >= 3), so since 1.4.0 the smallest n is found by bisection instead
+    of counting up from 3: the same n (checked in the tests against the
+    old count), found in about 2 log2(n) steps instead of n; a refusal
+    at 10^7 points now takes microseconds instead of about a minute.
     """
     tgt = float(target_sigma_beta)
     if not (np.isfinite(tgt) and tgt > 0.0):
         raise ValueError("target_sigma_beta must be positive")
-    n = 3
-    while beta_relative_sigma(n, decades, sigma_log) > tgt:
-        n += 1
-        if n > 10 ** 7:
+
+    def sb(n):
+        return beta_relative_sigma(n, decades, sigma_log)
+
+    lo, cap = 3, 10 ** 7
+    if sb(lo) <= tgt:
+        return lo, sb(lo)
+    hi = 2 * lo
+    while sb(hi) > tgt:         # doubling, then bisection
+        if hi == cap:
             raise ValueError(
                 "over 10^7 points would be needed: the target is out "
                 "of reach at this noise and range; widen the range "
                 "or reduce the noise")
-    return n, beta_relative_sigma(n, decades, sigma_log)
+        lo, hi = hi, min(2 * hi, cap)
+    while hi - lo > 1:          # sb(lo) > tgt >= sb(hi)
+        mid = (lo + hi) // 2
+        if sb(mid) > tgt:
+            lo = mid
+        else:
+            hi = mid
+    return hi, sb(hi)
 
 
 @dataclass(frozen=True)

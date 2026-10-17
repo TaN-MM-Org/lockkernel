@@ -19,7 +19,7 @@ import numpy as np
 from scipy import stats
 
 __all__ = ["LineShape", "lorentzian", "gaussian", "student_t", "box",
-           "bimodal_gaussian", "LINESHAPES"]
+           "bimodal_gaussian", "voigt", "LINESHAPES"]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -46,6 +46,12 @@ class LineShape:
     scale: float
     frozen: object = None
     compact_support: float = None
+
+    def __post_init__(self):
+        # the integrals place their break points at multiples of the scale;
+        # a zero or negative one silently gives wrong results (since 1.4.0
+        # refused)
+        _positive(self.scale, "LineShape scale")
 
     def __call__(self, delta):
         return self.pdf(delta)
@@ -130,7 +136,11 @@ def bimodal_gaussian(sep: float, width: float = 1.0) -> LineShape:
     """Two equal Gaussians of standard deviation `width` at +/- sep/2.
 
     The ratio sep/width controls the order of the transition; see
-    `lockkernel.parametric.c_coefficient`.
+    `lockkernel.parametric.c_coefficient`.  A negative `sep` gives the same
+    line as its absolute value.  (Before 1.4.0 its integration scale,
+    width + sep/2, came out zero or negative for sep <= -2 width, and the
+    integrals went wrong: for sep = -4, G(0.1) was twice the value for
+    sep = 4 and `branch_point` with the Kuramoto kernel raised TypeError.)
     """
     _positive(width, "width")
     if not mp.isfinite(mp.mpf(sep)):
@@ -145,7 +155,57 @@ def bimodal_gaussian(sep: float, width: float = 1.0) -> LineShape:
                     + mp.e ** (-(d + a) ** 2 / (2 * s ** 2)))
 
     return LineShape(f"bimodal{float(sep) / float(width):g}", pdf,
-                     float(width) + float(a))
+                     float(width) + abs(float(a)))
+
+
+def voigt(fwhm_gauss: float = 1.0, fwhm_lorentz: float = 1.0) -> LineShape:
+    """Voigt line: a Gaussian of FWHM `fwhm_gauss` convolved with a
+    Lorentzian of FWHM `fwhm_lorentz` (new in 1.4.0).
+
+    The usual shape of an inhomogeneous line that also has a Lorentzian
+    part.  With sigma = fwhm_gauss / (2 sqrt(2 ln 2)) and gamma =
+    fwhm_lorentz / 2 (the Lorentzian half width),
+
+        p(delta) = Re w(z) / (sigma sqrt(2 pi)),
+        z = (delta + i gamma) / (sigma sqrt 2),
+
+    with the Faddeeva function w(z) = exp(-z^2) erfc(-i z) (DLMF 7.2.3;
+    the Voigt functions are its real and imaginary parts, DLMF 7.19).
+    Far out, p ~ gamma / (pi delta^2), the Lorentzian tail.  Evaluating
+    Re w(z) there cancels about 2 log10|z| digits, so it is done with that
+    many guard digits; the tests hold the density to a 120-digit
+    evaluation, to SciPy's `voigt_profile`, to the convolution integral
+    and to the Lorentzian tail.
+
+    For the conservative kernel the branch is known in closed form,
+    because the Lorentzian smoothing that makes G(Omega) turns the line
+    into another Voigt line with gamma + Omega:
+
+        G(Omega) = pi erfcx((gamma + Omega) / (sigma sqrt 2)) / (sigma sqrt(2 pi)),
+
+    which the tests use.  Both widths must be finite and positive (use
+    `gaussian` or `lorentzian` for the limits).  There is no floating-
+    point distribution (`frozen` is None), so the line cannot be turned
+    into a class table for the dynamics modules.
+    """
+    _positive(fwhm_gauss, "fwhm_gauss")
+    _positive(fwhm_lorentz, "fwhm_lorentz")
+    fg, fl = mp.mpf(fwhm_gauss), mp.mpf(fwhm_lorentz)
+
+    def pdf(d):
+        d = mp.mpf(d)
+        # |Re z| = |d| / (sigma sqrt 2) = 2 sqrt(ln 2) |d| / fwhm_gauss
+        guard = 10 + int(2 * mp.log10(1 + 2 * abs(d) / fg))
+        with mp.extradps(guard):
+            sig = fg / (2 * mp.sqrt(2 * mp.log(2)))
+            r2 = sig * mp.sqrt(2)
+            z = mp.mpc(d, fl / 2) / r2
+            v = mp.re(mp.exp(-z ** 2) * mp.erfc(-1j * z)) \
+                / (sig * mp.sqrt(2 * mp.pi))
+        return +v
+
+    return LineShape(f"voigt{float(fwhm_gauss):g}_{float(fwhm_lorentz):g}",
+                     pdf, float(fwhm_gauss) + float(fwhm_lorentz))
 
 
 LINESHAPES = {
@@ -154,6 +214,7 @@ LINESHAPES = {
     "student_t": student_t,
     "box": box,
     "bimodal_gaussian": bimodal_gaussian,
+    "voigt": voigt,
 }
 
 
