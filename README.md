@@ -35,7 +35,10 @@ and the exponent, reads the kernel's tail back off the exponent, and
 plans how many points a target error bar costs. It also tests whether
 the data are consistent with the power law at their stated noise, and
 carries the uncertainties of the measured couplings and of calibration
-scales into the error bars. When the data cannot
+scales into the error bars. Since 1.4.0 it also answers the planning
+questions in theory terms: what `R` a model gives at the coupling you
+set, and how far above the threshold the onset is still a power law.
+When the data cannot
 support the number asked for, it stops with an error message that says
 why, rather than returning a number that looks fine but is not.
 
@@ -44,6 +47,7 @@ why, rather than returning a number that looks fine but is not.
 - [A short guide to the words used here](#a-short-guide-to-the-words-used-here)
 - [Install and conventions](#install-and-conventions)
 - [Examples](#examples) (each with the output it prints)
+- [Tutorials](#tutorials) (two worked lab analyses, from data to result)
 - [What is in the package](#what-is-in-the-package)
 - [When it refuses, and why](#when-it-refuses-and-why)
 - [How the results are checked](#how-the-results-are-checked)
@@ -59,6 +63,7 @@ why, rather than returning a number that looks fine but is not.
 - **Line shape** `p(delta)` -- the distribution of detunings across
   the group (the name comes from spectroscopy, where it is the shape
   of a spectral line). The package ships a Lorentzian, a Gaussian, a
+  Voigt line (a Gaussian convolved with a Lorentzian, new in 1.4.0), a
   Student-t (heavy tails), a box (flat) and a two-peaked Gaussian, and
   you can build your own `LineShape`.
 - **Coupling** `chiN` -- the coupling per oscillator times the number
@@ -127,15 +132,16 @@ and mpmath 1.2 or newer, and nothing else.
   precision does not need to exceed the number of decades you step
   towards the onset. The lab half and the dynamics work in ordinary
   floating point with NumPy.
-- **Line shapes** are normalised probability densities; `lorentzian`
+- **Line shapes** are normalized probability densities; `lorentzian`
   and `gaussian` take a full width at half maximum, `box` a half
-  width.
+  width, and `voigt` the full widths of its Gaussian and Lorentzian
+  parts.
 
 ## Examples
 
 Each example below runs as written, and the output shown is what it
-printed with lockkernel 1.3.0 (examples 1 to 9 print the same as with
-1.2.0). Line widths, couplings and noise levels are illustrative
+printed with lockkernel 1.4.0 (examples 1 to 11 print the same as with
+1.3.0). Line widths, couplings and noise levels are illustrative
 values, not taken from any experiment.
 
 ### 1. Threshold and exponent from the theory
@@ -591,6 +597,115 @@ same factor and leaves `beta` and `A` exactly as they were; scaling
 `chi_c` and `A` in quadrature, and the exponent is immune to both. The
 tests check both statements by refitting scaled data.
 
+### 12. A Voigt line, the branch at a set coupling, and the power-law range
+
+```python
+import mpmath as mp
+from lockkernel.lineshapes import voigt
+from lockkernel.kernels import conservative, kuramoto
+from lockkernel.parametric import (threshold, amplitude, branch_at_coupling,
+                                   local_exponent, eps_window)
+
+line = voigt(fwhm_gauss=1.0, fwhm_lorentz=0.3)   # Gaussian and Lorentzian FWHM
+print("threshold, conservative:", mp.nstr(threshold(line, conservative()), 10))
+print("threshold, Kuramoto:    ", mp.nstr(threshold(line, kuramoto()), 10))
+print("amplitude A, conservative:", mp.nstr(amplitude(line), 10))
+
+# What R does the Kuramoto model give at 1 % above its threshold?
+chi = 1.01 * threshold(line, kuramoto())
+chiN, R, eps, Omega = branch_at_coupling(line, kuramoto(), chi)
+print(f"at chiN = {mp.nstr(chiN, 8)}: R = {mp.nstr(R, 8)}, eps = {mp.nstr(eps, 8)}")
+print("local exponent there:", mp.nstr(local_exponent(line, kuramoto(), Omega)[1], 8))
+
+# How far above the threshold is the branch a power law (slope within 1 %)?
+eps_max, _ = eps_window(line, kuramoto(), rel_tol=0.01)
+print("power law within 1 % up to eps =", mp.nstr(eps_max, 4))
+```
+
+```
+threshold, conservative: 0.4397423632
+threshold, Kuramoto:     0.8794847264
+amplitude A, conservative: 1.415383889
+at chiN = 0.88827957: R = 0.15528283, eps = 0.01
+local exponent there: 0.49058262
+power law within 1 % up to eps = 0.005279
+```
+
+Real inhomogeneous lines are often Voigt lines: a Gaussian spread of
+frequencies, each with its own Lorentzian width. `voigt` takes the two
+full widths at half maximum. For the conservative kernel its branch is
+known in closed form (`G` is the same Voigt function at the Lorentzian
+half width plus `Omega`), and the tests hold the package to it.
+
+The theory half gives the branch as a function of the locking bandwidth
+`Omega`. In the lab you set the coupling instead.
+`branch_at_coupling(line, kernel, chiN)` finds the branch point at a
+given coupling and returns `(chiN, R, eps, Omega)`; `branch_at_eps` does
+the same for a given `eps`, which keeps full precision right at the
+threshold. Both assume a smooth (continuous) onset and refuse
+couplings at or below the threshold.
+
+`local_exponent(line, kernel, Omega)` returns `eps` and the exact local
+slope `d log R / d log eps` at that point, computed from `dG/dOmega`
+(no finite differences). Near the onset it tends to `beta`; farther up
+the branch bends. `eps_window` finds where the slope first differs from
+`beta` by `rel_tol`. Points below that `eps` see a local slope within
+`rel_tol` of `beta`, so a power-law fit there is biased by less than
+that. Here the Kuramoto branch is within 1 % of `beta = 1/2` only up to
+`eps = 0.0053`. Choose the measured range from it, then the number of
+points from `plan_fit` (tutorial 2 does both).
+
+## Tutorials
+
+Two worked analyses live in [`examples/`](examples). Each makes a
+seeded synthetic measurement with the package's exact branch, analyzes
+it the way you would analyze real data, and prints the result with its
+uncertainty. Each runs in under about 20 s, and a test checks that
+it prints the output below.
+
+### Tutorial 1: conservative or overdamped?
+
+[`examples/tutorial_which_kernel.py`](examples/tutorial_which_kernel.py).
+An ensemble has a measured Voigt line (Gaussian FWHM 1.00 +- 0.02,
+Lorentzian FWHM 0.30 +- 0.02) and a measured onset: 12 couplings from
+`1e-4` to `1e-2` above the threshold, 1 % noise on `R`, coupling errors
+and a 1 % coupling-scale calibration. Is it made of conservative spins
+(`beta = 1`, kernel mass `pi`) or overdamped phase oscillators
+(Kuramoto, `beta = 1/2`, mass `pi/2`)? The fit gives two independent
+answers: the exponent, and the kernel mass `m = 1/(p(0) chi_c)` from
+the threshold and the measured line. The amplitude that the Kuramoto
+model predicts (`amplitude_curvature`) is a third check.
+
+```
+fitted threshold chi_c = 0.879490 +- 0.0088 (with 1 % scale calibration)
+fitted exponent  beta  = 0.4957 +- 0.0048, chi2 = 4.3 for 9 dof, p = 0.89
+exponent: Kuramoto (1/2) is 0.9 sigma off, conservative (1) is 104 sigma off
+kernel tail refused: beta = 0.4957 +- 0.004827 is consistent with 1/2, which identifies only the CLASS s >= 3
+line center p(0) = 0.72386 +- 0.016
+kernel mass m = 1/(p(0) chi_c) = 1.571 +- 0.038
+mass: Kuramoto (pi/2 = 1.571) is 0.00 sigma off, conservative (pi = 3.142) is 41 sigma off
+amplitude: fitted A = 1.5224 +- 0.0421, Kuramoto prediction 1.5676 (1.1 sigma)
+```
+
+### Tutorial 2: plan, measure, read off the kernel tail
+
+[`examples/tutorial_plan_and_fit.py`](examples/tutorial_plan_and_fit.py).
+Conservative spins on a Lorentzian line. `eps_window` gives the range of
+`eps` where the branch is a power law within 1 %, and `points_for_fit`
+the number of couplings for an error bar of 0.007 on `beta` at 2 %
+noise. The exact branch at those couplings (`branch_at_coupling`), with
+seeded noise, is fitted, and the kernel tail `s = 1 + 1/beta` is read
+off. For contrast, the same number of points spread up to `eps = 0.5`
+gives a biased exponent, and the chi-square test flags it.
+
+```
+plan: power law within 1 % up to eps = 0.0101 (closed form 0.0101)
+plan: 16 points for beta +- 0.007 (planned error bar 0.00700)
+fit inside the window:  beta = 1.0012 +- 0.0070, chi2 = 5.9 for 13 dof, p = 0.95
+kernel tail s = 2.00 +- 0.01 (conservative spins: s = 2)
+fit up to eps = 0.5:    beta = 0.9554 +- 0.0027, chi2 = 180.7 for 13 dof, p = 1.2e-31
+```
+
 ## What is in the package
 
 The top level imports the `measured` names below and the submodules
@@ -603,14 +718,20 @@ directly.
 - `LineShape` -- a symmetric density with its value at the centre
   (`p0()`), and, where available, a floating-point `cdf` and `ppf`.
   Makers: `lorentzian`, `gaussian`, `student_t`, `box`,
-  `bimodal_gaussian`; `LINESHAPES` maps names to them.
+  `bimodal_gaussian` and (new in 1.4.0) `voigt(fwhm_gauss,
+  fwhm_lorentz)`; `LINESHAPES` maps names to them.
 - `Kernel` -- an even kernel with `W(0) = 1`, its tail exponent, its
   support, `mass()` and `second_moment()` (the integral of
   `u^2 W(u)`, finite only for compact support, fast decay or `s > 3`).
+  New in 1.4.0: `breaks`, points where `W` has a kink, which the
+  integrals use as break points (empty for the shipped kernels).
   Makers: `conservative`, `kuramoto`,
   `power_tail(s)`, `gaussian_kernel`; `KERNELS` maps names to them.
 - `heterogeneous(base, degree_exponent, eta=1, k_min=1)` -- the kernel
   averaged over a power-law spread of coupling strengths (example 6).
+  Since 1.4.0 any base kernel is reduced to one average over the base
+  kernel, `a X^-a integral_0^X x^(a-1) W(x) dx` with `a = (gamma-2)/eta`
+  and `X = |v|/k_min^eta`, which stays accurate far out in the tail.
 - `predicted_beta(s)` -- the exponent the rule gives for tail `s`
   (`None` meaning no algebraic tail), for a line with a rounded top.
 
@@ -634,6 +755,13 @@ directly.
 - `fold_interval` -- samples the branch and, if it folds back, returns
   the coupling range of the hysteresis, the turning points and the
   jump in `R` (`None` if the branch does not fold; example 8).
+- New in 1.4.0 (example 12): `branch_at_coupling(line, kernel, chiN)`
+  and `branch_at_eps(line, kernel, eps)` -- the branch point
+  `(chiN, R, eps, Omega)` at a given coupling or reduced coupling;
+  `local_exponent(line, kernel, Omega)` -- `eps` and the exact local
+  slope `d log R / d log eps`; `eps_window(line, kernel, rel_tol=0.01)`
+  -- the largest `eps` (and its `Omega`) up to which that slope stays
+  within `rel_tol` of `beta`.
 
 **Fitting measured data** (`lockkernel.measured`, also at the top level)
 
@@ -735,19 +863,34 @@ gives its inputs and conventions.
 - a line shape is given a width that is not finite and positive;
 - `tail_integral` is asked for `s` outside `1 < s < 3`, where it
   diverges;
+- (new in 1.4.0) `G_of_Omega`, `H_of_Omega`, `branch_point` or
+  `local_exponent` get a negative or non-finite `Omega` (1.3.0 returned
+  twice the right `G` for a negative one); a `LineShape` is built with a
+  scale that is not finite and positive; `voigt` gets a width that is
+  not finite and positive;
+- (new in 1.4.0) `branch_at_coupling` gets a coupling at or below the
+  threshold, or `branch_at_eps` an `eps <= 0`; either meets a branch
+  that bends back or is flat (a first-order or jump onset; see
+  `fold_interval`) or does not converge;
+- (new in 1.4.0) `local_exponent` or `eps_window` gets a line with
+  compact support (it is not differentiable), or a point where the
+  branch does not rise; `eps_window` finds the local exponent outside
+  the band already at the start of its search, or gets `rel_tol`
+  outside `(0, 1)`;
 - `amplitude_general` is asked for a kernel without a tail in
   `1 < s < 3`, or (new in 1.3.0) its default tail amplitude `C`, read
   off the kernel at `|u| = 10^6`, differs by more than a relative 1e-6
   from the value at `10^9` (pass `C` yourself then);
 - `class_exact` gets class populations that are not whole numbers;
 - a line shape without a floating-point distribution
-  (`bimodal_gaussian`) is asked for `cdf`, `ppf` or a class table;
+  (`bimodal_gaussian`, `voigt`) is asked for `cdf`, `ppf` or a class
+  table;
 - the solver of the differential equations fails in `evolve` or
   `evolve_meanfield`.
 
 ## How the results are checked
 
-128 automated tests run on every push and pull request, on Python 3.9
+172 automated tests run on every push and pull request, on Python 3.9
 to 3.14, and once more on Python 3.10 with the oldest NumPy (1.22.0),
 SciPy (1.8.0) and mpmath (1.2.1) the package allows. The numerical
 checks compare the package with something independent of it: a closed
@@ -849,6 +992,51 @@ form or a calculation done another way)
   1.07 to 1e-9 and leaves `beta` and `A` unchanged to 1e-7; scaling `R`
   scales only `A`. `with_calibration` adds in quadrature to 1e-12.
 
+**New in 1.4.0** (15 digits unless stated; every reference is a closed
+form, a special function evaluated by mpmath at 40 digits or more, an
+independent implementation, or the 1.3.0 code path)
+
+- Averaged kernels (`heterogeneous`) against closed forms for the
+  conservative, `1/(1+|u|^2.5)` and Gaussian base kernels: a Gauss
+  hypergeometric function `2F1(1, b; 1+b; -v^s0)`, `b = (gamma-2)/(eta s0)`,
+  and an incomplete gamma function, for eight pairs of `gamma` and
+  `eta` and `v` from 0.3 to 1e12, to a relative 1e-13. The Kuramoto
+  average with `k_min` = 2 and 0.5 against the weight integral itself
+  (30-digit quadrature) to 1e-13; masses against
+  `m0 k_min^eta (gamma-2)/(gamma-2-eta)` to 1e-13; with `k_min = 2`,
+  `amplitude_general` now accepts the exact power-law tail and its
+  default `C` equals the closed form.
+- Voigt line: the density against a 120-digit evaluation out to 1e30
+  line widths (1e-14), SciPy's `voigt_profile` (1e-12), the
+  convolution integral of the Gaussian and the Lorentzian (1e-13), its
+  normalization (1e-12) and its Lorentzian tail (1e-13), for four width
+  ratios. With the conservative kernel: threshold, `chiN`, `R` and
+  `eps` on the branch against the closed form
+  `G = pi erfcx(y)/(sigma sqrt(2 pi))`, `y = (gamma + Omega)/(sigma sqrt 2)`,
+  to 1e-12 or better; `c` and the amplitude against their closed forms
+  (1e-12). With the Kuramoto kernel, `amplitude_curvature` against its
+  closed form (1e-12) and against `R/sqrt(eps)` on the branch (1e-10).
+- `local_exponent` against `1/(1+eps)` and `(1/2)/(1+eps)` (Lorentzian
+  line, conservative and Kuramoto kernels) to 1e-13, against the Voigt
+  closed form to 1e-12, and against a central difference along the
+  branch at 30 digits (Gaussian line, `s = 2.5`) to 1e-12.
+- `branch_at_coupling` and `branch_at_eps` against `chiN = a + Omega`
+  and `R = sqrt(eps/(1+eps))` on the Lorentzian line (1e-13), against
+  the Voigt closed form inverted by mpmath's root finder at 40 digits
+  (1e-12), and round trips through `branch_point` (1e-12).
+  `eps_window` against `rel_tol/(1 - rel_tol)` (1e-8).
+- `branch_point` and `sweep` give bit-identical results to the 1.3.0
+  code path (kept in the test) on five line-kernel pairs, and
+  `points_for_beta` the same counts as 1.3.0's search.
+- `bimodal_gaussian(-4)` gives exactly the results of
+  `bimodal_gaussian(4)`; the class table with the free edge beyond
+  `delta_max` holds `2 sf(free edge)` in its free classes (1e-9) and
+  reproduces the locking integral within 5e-5; `physicality` and
+  `valid_window` on a coherent state (covariance eigenvalue 0, Bloch
+  length 1) and on a state outside the Bloch sphere.
+- The two tutorials run and print what this README shows, and their
+  results agree with the truth of their synthetic data.
+
 **The exponent rule** (25 digits, Gaussian line, `Omega` down to 1e-6)
 
 - `beta = 1/(s-1)` or 1/2 for the kernel family with `s` = 1.5, 1.8,
@@ -907,9 +1095,39 @@ form or a calculation done another way)
   within 5e-3 for couplings `r` = 1.2, 2 and 3 times the threshold,
   and stays below 0.05 at 0.6 times the threshold.
 
-Not covered by tests: `physicality` and `valid_window`.
-
 ## Corrections in earlier versions
+
+**1.4.0 fixed four silent errors.** Numbers are at mpmath's default 15
+digits.
+
+- `heterogeneous` integrated the weight over the coupling strengths on a
+  linear scale out to infinity, which lost accuracy far out in the
+  kernel's tail. Against the closed forms, the conservative kernel
+  averaged with `gamma = 2.6`, `eta = 0.5` was 2.9 % low at `v = 1e9`,
+  and its mass was 18.84621 instead of 18.84956 (so its threshold 1.8e-4
+  high; the mass took 107 s, now 7 s). The Gaussian kernel averaged
+  with `gamma = 2.5`, `eta = 0.25` was 2.5 % low at `v = 1e4` and 9.5 %
+  from `1e6` on. The Kuramoto average with `k_min = 2`, `gamma = 3.8`
+  was 2.8e-4 off at `v = 1e9`, so `amplitude_general` refused it as
+  "not converged", and its mass was 2.8e-6 high. All now match the
+  closed forms to about 1e-15. The `k_min = 1` Kuramoto average of
+  example 6 was already exact and is unchanged.
+- `bimodal_gaussian` with a negative separation (the same line as the
+  positive one) got a negative integration scale: for `sep = -4`,
+  `G(0.1)` was 0.390375 instead of 0.195187, `c` was -0.0878293 instead
+  of -0.0891192, and `branch_point` with the Kuramoto kernel raised
+  `TypeError`.
+- `G_of_Omega` with a negative `Omega` returned twice the value at
+  `|Omega|` (3.3333 instead of 1.6667 at -0.1 on the Lorentzian line).
+  A negative or non-finite `Omega` is now refused.
+- `class_table` (and `build_system`, for couplings above about 125 line
+  widths) counted part of the population twice when the edge of the
+  free classes lay beyond `delta_max`: with the edge at 5000 and
+  `delta_max` at 1000 the raw total was 1.000197, and the locking
+  integral was 2.1e-4 off instead of 1.4e-5.
+
+All 128 earlier tests pass (one changed only in the version number it
+checks), and examples 1 to 11 print the same as with 1.3.0.
 
 **1.3.0 fixed five silent errors.** Numbers are at mpmath's default 15
 digits unless stated.
@@ -1042,6 +1260,20 @@ CI did not run Python 3.10. The full history is in
   kernel at `|u| = 10^6`; for `power_tail(s)` it is low by a relative
   `10^(-6 s)`, which the power `1/(s-1)` multiplies (2.5e-6 in `A` for
   `s = 1.1`). Pass `C` for more digits.
+- `voigt` has no floating-point distribution, so it cannot be turned
+  into a class table for the dynamics modules. Each density value
+  takes extra digits far out in the tail, which makes integrals over a
+  Voigt line several times slower than over a Gaussian one.
+- `branch_at_coupling` and `branch_at_eps` assume a continuous onset,
+  where `eps` rises with `Omega`; on a folded branch they refuse when
+  they meet `eps <= 0`, but where a branch folds above the threshold (an
+  S shape) they return one of the solutions. Check with
+  `fold_interval` first if the line has several peaks.
+- `local_exponent` and `eps_window` need a differentiable line, and
+  `eps_window` assumes the local exponent leaves the band once and
+  for all as `eps` grows (true for the closed forms tested). It follows
+  the branch in half decades of `Omega`, so a band left and re-entered
+  within half a decade is not seen.
 - `build_system`'s docstring refers to a convergence check in
   `scripts/vlasov_check.py`; that script belongs to the research
   repository and is not part of this package.
@@ -1059,7 +1291,9 @@ changes only `c_coefficient`; 1.2.0 changes how `G`, `eps` and the
 fold are computed, and adds `amplitude_curvature` and
 `Kernel.second_moment`; 1.3.0 changes how the kernel mass, the second
 moment and `tail_integral` are integrated, and how `class_exact` steps
-through time); the `measured` module and the packaging are new here. Copyright as in [NOTICE](NOTICE).
+through time; 1.4.0 changes how `heterogeneous` averages the kernel,
+fixes the scale of `bimodal_gaussian` and the free classes of
+`class_table`, and adds `voigt` and the branch tools); the `measured` module and the packaging are new here. Copyright as in [NOTICE](NOTICE).
 
 ## Citing, support and license
 

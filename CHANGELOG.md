@@ -5,14 +5,131 @@ form, an exact identity, high-precision quadrature against
 independent closed forms, or seeded simulation; the release notes on
 GitHub carry the full anchor lists.
 
-## Unreleased
+## 1.4.0 (2026-10-17)
 
+### Added
+
+- `lineshapes.voigt(fwhm_gauss, fwhm_lorentz)`: the Voigt line, a
+  Gaussian convolved with a Lorentzian, `p = Re w(z)/(sigma sqrt(2 pi))`
+  with the Faddeeva function `w(z) = exp(-z^2) erfc(-iz)` (DLMF 7.2.3,
+  7.19.3), evaluated with `2 log10|z|` guard digits (without them the
+  density was 44 % off at 1e8 widths). Tests: a 120-digit evaluation
+  out to 1e30 widths (1e-14), SciPy's `voigt_profile` (1e-12), the
+  convolution integral (1e-13), normalization and the Lorentzian tail;
+  with the conservative kernel the branch, threshold, `c` and amplitude
+  against the closed form `G = pi erfcx((gamma + Omega)/(sigma sqrt 2))
+  / (sigma sqrt(2 pi))` (1e-12); with the Kuramoto kernel
+  `amplitude_curvature` against its closed form (1e-12).
+- `parametric.branch_at_coupling(line, kernel, chiN)` and
+  `branch_at_eps(line, kernel, eps)`: the branch point
+  `(chiN, R, eps, Omega)` at a coupling the lab sets, by a safeguarded
+  secant iteration on log eps against log Omega. Tests: closed forms on
+  the Lorentzian line (conservative and Kuramoto kernels, 1e-13), the
+  Voigt closed form inverted by mpmath's root finder at 40 digits
+  (1e-12), round trips through `branch_point` (1e-12). Refuses couplings
+  at or below the threshold and branches that bend back or are flat.
+- `parametric.local_exponent(line, kernel, Omega)`: `eps` and the exact
+  local exponent `d log R / d log eps = -(G + Omega G') D /
+  (Omega G' (G + D))`, from `dG/dOmega` (no finite difference along the
+  branch). Tests: `1/(1+eps)` and `(1/2)/(1+eps)` on the Lorentzian line
+  (1e-13), the Voigt closed form (1e-12), a 30-digit central difference
+  along the branch (1e-12).
+- `parametric.eps_window(line, kernel, rel_tol=0.01)`: how far above the
+  threshold the local exponent stays within `rel_tol` of `beta`, for
+  choosing the range of a fit. Test: `rel_tol/(1 - rel_tol)` for the
+  conservative and Kuramoto kernels on the Lorentzian line (1e-8).
+- `kernels.Kernel.breaks` (default empty): kinks of `W`, used as
+  quadrature break points; the Kuramoto average with `k_min != 1` has
+  one at `v = k_min^eta`.
+- Tests for `physicality` and `valid_window`, which had none.
+- README example 12 and a Tutorials section; 172 tests (from 128).
+
+### Fixed
+
+- `heterogeneous` took the weight integral on a linear scale out to
+  infinity and lost accuracy far out in the tail (and, for the
+  Kuramoto base with `k_min != 1`, at the kink `v = k_min`). It is now
+  reduced, for every base kernel, to `a X^-a int_0^X x^(a-1) W(x) dx`
+  (`a = (gamma-2)/eta`, `X = |v|/k_min^eta`), one quadrature scaled by
+  the size of the tail (the Kuramoto base keeps its closed form, now for
+  any `k_min`). Before -> after, relative to closed forms at 15 digits:
+  conservative base, `gamma = 2.6`, `eta = 0.5`: `W(1e9)` -2.9e-2 ->
+  2e-16, mass 18.84621 -> 18.84956 (closed form 18.84956; it took
+  107 s, now 7 s); Gaussian base, `gamma = 2.5`, `eta = 0.25`: `W(1e4)`
+  -2.5e-2 -> -2e-15, `W(1e6)` -9.5e-2 -> 9e-16; conservative base,
+  `gamma = 4.4`: `W(1e9)` +4.1e-3 -> 2e-15; Kuramoto base, `k_min = 2`,
+  `gamma = 3.8`: `W(1e9)` +2.8e-4 -> 0, mass +2.8e-6 -> 2e-16, and
+  `amplitude_general` no longer refuses it ("not converged": 2.389384
+  at 1e6 against 2.390062 at 1e9; the closed form is 2.389392). Tests:
+  `test_averaged_kernel_closed_forms`, `test_averaged_kuramoto_with_k_min`,
+  `test_averaged_kernel_mass`,
+  `test_amplitude_general_accepts_an_exact_power_tail_with_k_min`.
+- `bimodal_gaussian` with a negative separation got the integration
+  scale `width + sep/2`, zero or negative for `sep <= -2 width`: for
+  `sep = -4`, `G(0.1)` 0.390375 -> 0.195187, `c` -0.0878293 ->
+  -0.0891192, and `branch_point` with the Kuramoto kernel raised
+  TypeError. The scale is now `width + |sep|/2` (unchanged for
+  `sep >= 0`). Test: `test_negative_separation_is_the_same_line`.
+- `G_of_Omega` with a negative `Omega` returned twice `G(|Omega|)`
+  (3.3333 instead of 1.6667 at -0.1 on the Lorentzian line), and
+  `branch_point` raised TypeError (negative) or ZeroDivisionError
+  (infinite). They now refuse. Test:
+  `test_negative_or_infinite_omega_is_refused`.
+- `class_table` with the free edge at or beyond `delta_max` (as
+  `build_system` places it for `chiN` above about 125 line widths)
+  reversed the range of the free bins, and the last one counted the
+  population between `delta_max` and the edge a second time: for the
+  edge at 5000 and `delta_max` 1000 the raw total was 1.000197 and the
+  locking integral at `Omega = 0.5` was off by 2.1e-4 -> 1.4e-5. The
+  free bins now span one decade beyond the edge in that case. Test:
+  `test_class_table_free_edge_beyond_delta_max`.
+
+### Changed
+
+- `LineShape` refuses a scale that is not finite and positive (the
+  integrals put their break points at multiples of it).
+- `G_of_Omega`, `H_of_Omega` and `branch_point` refuse a negative or
+  non-finite `Omega`.
+- Type hints on `branch_point`, `sweep` and the new functions.
 - Packaging: the license is now given as the SPDX expression
   `license = "Apache-2.0"` with `license-files = ["LICENSE"]`, and the
   old license table and license classifier are gone. Building no longer
   prints setuptools' deprecation warnings (their support ends on
   2027-02-18). Building from source now needs setuptools 77 or newer;
-  installing the package is unchanged.
+  installing the package is unchanged. The source distribution now
+  includes `examples/`.
+- All 128 earlier tests pass (the version check now expects 1.4.0), and
+  README examples 1 to 11 print the same as with 1.3.0.
+
+### Performance
+
+- `branch_point` and `sweep` (so `extract_beta`) remember each kernel
+  value `W(u)` within a call, and `G(0) - G(Omega)` reuses its first
+  pass in its second: `extract_beta` of example 6 (averaged Kuramoto
+  kernel, 25 digits) 4.94 s -> 2.01 s (2.5x) and of example 1 (`s =
+  2.5`) 2.44 s -> 1.51 s (1.6x), medians of 5 runs on the same machine;
+  single `branch_point` calls 1.0x to 2x. Bit-identical: the test runs
+  the 1.3.0 code path (kept in the test) on five line-kernel pairs and
+  compares every number exactly (`test_branch_point_and_sweep_bit_identical`).
+- `points_for_beta` finds the number of points by doubling and
+  bisection instead of counting up from 3: the same result (checked
+  against the old count, `test_points_for_beta_same_as_counting`);
+  15716 points 0.068 s -> 0.00009 s, and a refusal (over 10^7 points)
+  53 s -> 0.00007 s.
+
+### Tutorials
+
+- `examples/tutorial_which_kernel.py`: conservative or overdamped? From
+  a synthetic measured onset on a Voigt line with width errors, coupling
+  errors and calibration, the exponent, the kernel mass from the
+  threshold and the predicted amplitude decide between the two models.
+- `examples/tutorial_plan_and_fit.py`: plan the range with `eps_window`
+  and the number of points with `points_for_fit`, measure with
+  `branch_at_coupling`, fit, and read off the kernel tail; points beyond
+  the window give a biased exponent that the chi-square test flags.
+- Both print the output quoted in the README, which
+  `tests/test_tutorials.py` checks along with the truth of their
+  synthetic data.
 
 ## 1.3.0 (2026-10-10)
 
