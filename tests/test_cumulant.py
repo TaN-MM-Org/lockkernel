@@ -165,3 +165,91 @@ def test_class_exact_refusals():
         class_exact([0.0, 1.0], [2.5, 2.0], 1.0, [0.1])
     with pytest.raises(ValueError, match="equal length"):
         class_exact([0.0, 1.0], [2, 2, 2], 1.0, [0.1])
+
+
+# ---------------------------------------------------------------------------
+# New in 1.5.0: the faster full_exact against the 1.4.0 code, kept here
+# ---------------------------------------------------------------------------
+
+def _full_exact_1_4_0(deltas, chiN, times):
+    """full_exact as in 1.4.0: dense Kronecker products, the exchange term
+    as the N^2 products sigma+_j sigma-_k, the covariance from J_a J_b."""
+    from lockkernel.exact import _wineland_from_moments
+    deltas = np.asarray(deltas, float)
+    N = len(deltas)
+    dim = 2 ** N
+    chi1 = chiN / N
+    sx = np.array([[0, 1], [1, 0]], complex)
+    sy = np.array([[0, -1j], [1j, 0]], complex)
+    sz = np.array([[1, 0], [0, -1]], complex)
+    sp = np.array([[0, 1], [0, 0]], complex)
+    sm = sp.T.copy()
+
+    def op(single, j):
+        out = np.array([[1.0 + 0j]])
+        for i in range(N):
+            out = np.kron(out, single if i == j else np.eye(2))
+        return out
+
+    SP = [op(sp, j) for j in range(N)]
+    SM = [op(sm, j) for j in range(N)]
+    SZ = [op(sz, j) for j in range(N)]
+    SX = [op(sx, j) for j in range(N)]
+    SY = [op(sy, j) for j in range(N)]
+    H = np.zeros((dim, dim), complex)
+    for j in range(N):
+        H += 0.5 * deltas[j] * SZ[j]
+        for k in range(N):
+            H += chi1 * (SP[j] @ SM[k])
+    Js = [0.5 * sum(SX), 0.5 * sum(SY), 0.5 * sum(SZ)]
+    w, V = np.linalg.eigh(H)
+    psi0 = np.ones(dim, complex) / np.sqrt(dim)
+    c0 = V.conj().T @ psi0
+    contrast, xi2 = [], []
+    for t in np.atleast_1d(times):
+        psi = V @ (np.exp(-1j * w * t) * c0)
+        mean = np.array([np.vdot(psi, A @ psi).real for A in Js])
+        Cov = np.empty((3, 3))
+        for a in range(3):
+            for b in range(3):
+                Cov[a, b] = 0.5 * np.vdot(
+                    psi, (Js[a] @ Js[b] + Js[b] @ Js[a]) @ psi).real
+        Cov -= np.outer(mean, mean)
+        contrast.append(2.0 * np.hypot(mean[0], mean[1]) / N)
+        xi2.append(_wineland_from_moments(mean, Cov, N))
+    return np.array(contrast), np.array(xi2)
+
+
+@pytest.mark.parametrize("deltas,chiN", [
+    ([0.0], 1.0),
+    ([-0.5, 0.7], 2.0),
+    ([-1.0, -1.0, -0.3, -0.3, 0.3, 0.3, 1.0, 1.0], 1.5),
+    ([-1.3, -0.2, 0.0, 0.1, 0.4, 0.9, 1.7, 2.2], 0.8),
+])
+def test_full_exact_same_as_1_4_0(deltas, chiN):
+    """The same contrast R and Wineland parameter xi^2 as the 1.4.0 code.
+
+    The two build the same Hamiltonian in a different order (chi1 J+ J- in
+    one product against N^2 summed products), so H differs by rounding,
+    of order N^2 * 1e-16 relative.  The propagated state then differs by
+    about (eigensolver backward error ~ dim * 1e-16) * t ||H||, below
+    1e-12 for these sizes and times, and so does R (an O(1) contrast):
+    tolerance 1e-11.  xi^2 = N v_min / |J|^2 with |J| = N R / 2 is
+    ill-conditioned when R is small (here R falls to 0.026 at t = 3, where
+    xi^2 = 1297): its relative error is about 2 dR/R + dv/v, so the
+    tolerance is 1e-11 xi^2 / R^2 (observed: below 3e-13 relative)."""
+    times = np.array([0.0, 0.05, 0.7, 3.0, 11.0])
+    R_new, xi_new = full_exact(deltas, chiN, times)
+    R_old, xi_old = _full_exact_1_4_0(deltas, chiN, times)
+    assert np.max(np.abs(R_new - R_old)) < 1e-11
+    assert np.all(np.abs(xi_new - xi_old) < 1e-11 * xi_old / R_old ** 2)
+    assert abs(R_new[0] - 1.0) < 1e-12          # t = 0: all along +x
+
+
+def test_full_exact_refusals():
+    with pytest.raises(ValueError, match="finite detunings"):
+        full_exact([], 1.0, [0.1])
+    with pytest.raises(ValueError, match="finite detunings"):
+        full_exact([0.0, float("nan")], 1.0, [0.1])
+    with pytest.raises(ValueError, match="finite"):
+        full_exact([0.0, 1.0], float("inf"), [0.1])

@@ -78,3 +78,29 @@ def test_tutorial_plan_and_fit():
     assert abs(s - 2) < 3 * max(s_err, 0.005)
     # beyond the window the fit is biased and the chi-square test says so
     assert abs(wide - 1) > 10 * s_wide and p_wide < 1e-10
+
+
+def test_tutorial_whole_branch():
+    """New in 1.5.0.  The synthetic data are the exact Kuramoto branch on a
+    Gaussian line with k = 0.0371 per volt and R unscaled."""
+    out = _run("tutorial_whole_branch.py")
+    _documented("tutorial_whole_branch.py", out)
+    beta, s_beta, p_pl = _num(r"beta = ([\d.]+) \+- ([\d.]+), chi2 = [\d.]+ "
+                              r"for 9 dof, p = ([\d.e-]+)", out)
+    p_g, = _num(r"Gaussian line: +chi2 = [\d.]+ for 11 dof, p = ([\d.e-]+)", out)
+    p_l, = _num(r"Lorentzian line: chi2 = [\d.]+ for 11 dof, p = ([\d.e-]+)", out)
+    k, s_k, k_true = _num(r"k = ([\d.]+) \+- ([\d.]+) per volt \(true ([\d.]+)\)",
+                          out)
+    chi_c, s_c, c_true = _num(r"threshold chi_c = ([\d.]+) \+- ([\d.]+) V "
+                              r"\(true ([\d.]+) V\)", out)
+    q, s_q, chi_q, s_cq = _num(r"q = ([\d.]+) \+- ([\d.]+), threshold ([\d.]+) "
+                               r"\+- ([\d.]+) V", out)
+    # the power law over the whole range is biased and rejected
+    assert abs(beta - 0.5) > 10 * s_beta and p_pl < 1e-10
+    # the right model is kept, the wrong line rejected
+    assert p_g > 0.01 and p_l < 1e-10
+    # the calibration and the threshold recover the truth
+    assert k_true == 0.0371 and abs(k - k_true) < 3 * max(s_k, 1e-6)
+    assert abs(chi_c - c_true) < 3 * s_c and abs(chi_q - c_true) < 3 * s_cq
+    assert abs(c_true - 18.2658) < 1e-4
+    assert abs(q - 1.0) < 3 * s_q

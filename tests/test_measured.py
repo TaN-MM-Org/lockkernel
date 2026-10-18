@@ -129,7 +129,7 @@ def test_metadata_and_no_matplotlib():
          "print('matplotlib' in sys.modules)"],
         capture_output=True, text=True, check=True)
     version, has_mpl = out.stdout.split()
-    assert version == "1.4.0"
+    assert version == "1.5.0"
     assert has_mpl == "False"
 
 
@@ -236,6 +236,34 @@ def test_points_for_fit_two_sided_and_monotonic():
     assert points_for_fit(1.0, *args)[0] == 6
     n_known, _ = points_for_fit(0.003, *args, fit_threshold=False)
     assert n_known < n
+
+
+@pytest.mark.parametrize("fit_threshold", [False, True])
+def test_points_for_fit_reaches_the_cap(monkeypatch, fit_threshold):
+    """The search for the number of points stops at 10^7 itself.  1.4.0
+    doubled from 6 (or 3) up to 6291456 and then straight past 10^7, so it
+    refused every target that needs 6291457 to 10^7 points ("over 10^7
+    points would be needed").  The search does not depend on how the error
+    bar is computed, so plan_fit is replaced here by the closed form
+    beta_relative_sigma (which plan_fit equals for a known threshold, test
+    above), which costs nothing for millions of points; points_for_beta's
+    own search of that closed form gives the reference count."""
+    import lockkernel.measured as M
+
+    def closed(n, lo, hi, beta, sigma_log, fit_threshold=True):
+        return M.FitPlan(n, (lo, hi), beta, sigma_log, fit_threshold,
+                         beta_relative_sigma(n, 2.0, sigma_log), 0.0, 0.0)
+
+    monkeypatch.setattr(M, "plan_fit", closed)
+    for want in (6291457, 8_000_000, 10 ** 7):
+        tgt = beta_relative_sigma(want, 2.0, 0.05)
+        n, plan = M.points_for_fit(tgt, 1e-4, 1e-2, 1.0, 0.05,
+                                   fit_threshold=fit_threshold)
+        assert n == want == points_for_beta(tgt, 2.0, 0.05)[0]
+        assert plan.sigma_beta <= tgt < beta_relative_sigma(n - 1, 2.0, 0.05)
+    with pytest.raises(ValueError, match="10\\^7"):
+        M.points_for_fit(beta_relative_sigma(10 ** 7 + 1, 2.0, 0.05), 1e-4,
+                         1e-2, 1.0, 0.05, fit_threshold=fit_threshold)
 
 
 def test_plan_fit_refusals():

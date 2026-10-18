@@ -14,6 +14,7 @@ DPS = {
     "test_onset": 15,
     "test_kernels_and_lines": 15,
     "test_branch_tools": 15,
+    "test_exact_branch_fit": 15,
 }
 
 

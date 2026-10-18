@@ -435,6 +435,77 @@ def test_general_amplitude_refusals():
         P.amplitude_general(L.gaussian(1.0), K.power_tail(2.5), C=-1)
 
 
+# ---------------------------------------------------------------------------
+# New in 1.5.0: I_s and the general amplitude on lines with compact support
+# ---------------------------------------------------------------------------
+
+def _semicircle(w):
+    """Semicircle line p = 2 sqrt(w^2 - d^2) / (pi w^2) on |d| < w: compact
+    support with a rounded top, p''(0) = -2/(pi w^3)."""
+    w = mp.mpf(w)
+
+    def pdf(d):
+        d = mp.mpf(d)
+        return 2 * mp.sqrt(w ** 2 - d ** 2) / (mp.pi * w ** 2) if abs(d) < w \
+            else mp.mpf(0)
+
+    return LineShape("semicircle", pdf, float(w), compact_support=float(w))
+
+
+@pytest.mark.parametrize("w", [0.001, 1.0, 1000.0])
+def test_tail_integral_on_compact_lines(w):
+    """Closed forms of I_s = 2 int_0^inf [p(0) - p(d)] d^-s dd.
+
+    Box of half width w: p(0) - p = 0 inside, p(0) = 1/(2w) outside, so
+    I_s = w^-s / (s-1).  Semicircle of radius w: with y = (d/w)^2 the inner
+    part is (2/(pi w^s)) int_0^1 y^(a-1) [1 - (1-y)^(1/2)] dy, a = (1-s)/2,
+    which is 1/a - B(a, 3/2) by analytic continuation of the Beta integral
+    (both sides analytic for a > -1); 1/a cancels the outer part
+    2 p(0) w^(1-s)/(s-1), leaving I_s = -(2/pi) B((1-s)/2, 3/2) w^-s.
+    1.4.0 integrated -p' by parts, which misses the jump of the box at its
+    edge: I_s = 0 for the box at every s (closed form 2 at s = 1.5 and
+    w = 1), and amplitude_general raised ZeroDivisionError."""
+    with mp.workdps(15):
+        for s in ("1.1", "1.5", "2", "2.5", "2.9", "2.99"):
+            s = mp.mpf(s)
+            got = P.tail_integral(L.box(w), s)
+            assert abs(got / (mp.mpf(w) ** -s / (s - 1)) - 1) < mp.mpf("1e-13")
+            got = P.tail_integral(_semicircle(w), s)
+            with mp.workdps(40):
+                want = -(2 / mp.pi) * mp.beta((1 - s) / 2, mp.mpf(3) / 2) \
+                    * mp.mpf(w) ** -s
+            assert abs(got / want - 1) < mp.mpf("1e-13")
+        # at s = 2, I_s = pi c, with c from its own (direct) integral
+        for line in (L.box(w), _semicircle(w)):
+            c = P.c_coefficient(line)
+            assert abs(P.tail_integral(line, 2) / (mp.pi * c) - 1) < mp.mpf("1e-13")
+
+
+@pytest.mark.parametrize("s", ["1.5", "2.5"])
+def test_general_amplitude_on_the_box_line(s):
+    """Box of half width 1 with W = 1/(1+|u|^s): every piece in closed form,
+    p(0) = 1/2, m = 2 (pi/s)/sin(pi/s), C = 1, I_s = 1/(s-1); and the limit
+    R / eps^(1/(s-1)) of the closed-form branch at Omega = 1e-40 and 60
+    digits, where the correction (s/(s-1)) eps is below 1e-18.  There
+    D = G(0) - G = int_X^inf du/(1+u^s) = X^(1-s) 2F1(1, b; 1+b; -X^-s)/(s-1),
+    X = 1/Omega, b = (s-1)/s (termwise integration of the geometric series),
+    eps = D/(G(0) - D) and R = Omega (G(0) - D)."""
+    with mp.workdps(15):
+        A = P.amplitude_general(L.box(1.0), K.power_tail(s), C=1)
+        S = mp.mpf(s)
+        G0 = (mp.pi / S) / mp.sin(mp.pi / S)
+        want = G0 * (G0 * (S - 1)) ** (1 / (S - 1))
+        assert abs(A / want - 1) < mp.mpf("1e-13")
+    with mp.workdps(60):
+        S = mp.mpf(s)
+        G0 = (mp.pi / S) / mp.sin(mp.pi / S)
+        Om = mp.mpf(10) ** -40
+        X, b = 1 / Om, (S - 1) / S
+        D = X ** (1 - S) * mp.hyp2f1(1, b, 1 + b, -X ** -S) / (S - 1)
+        lim = Om * (G0 - D) / (D / (G0 - D)) ** (1 / (S - 1))
+    assert abs(A / lim - 1) < mp.mpf("1e-13")
+
+
 def test_input_checks_of_lines_and_kernels():
     for bad in (0.0, -1.0, float("nan"), float("inf")):
         with pytest.raises(ValueError, match="positive"):
