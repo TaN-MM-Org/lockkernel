@@ -5,6 +5,18 @@ form, an exact identity, high-precision quadrature against
 independent closed forms, or seeded simulation; the release notes on
 GitHub carry the full anchor lists.
 
+## 1.5.1 (2026-10-18)
+
+### Fixed
+
+- The NOTICE file is shipped again. Since 1.4.0 `pyproject.toml` listed
+  only `LICENSE` under `license-files`, so the source distribution and
+  the wheel left out `NOTICE` (1.3.0 still had it). Before: the
+  installed metadata named one license file (`LICENSE`); after: two
+  (`LICENSE`, `NOTICE`). The conda-forge build of 1.5.0 stopped on this
+  with "No license files were copied". No code changed. Test:
+  `tests/test_packaging.py`.
+
 ## 1.5.0 (2026-10-18)
 
 ### Added

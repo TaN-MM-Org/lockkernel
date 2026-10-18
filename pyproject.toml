@@ -4,12 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lockkernel"
-version = "1.5.0"
+version = "1.5.1"
 description = "Locking kernel universality: exact thresholds and exponents of synchronization transitions, and fits of measured branches with error bars and refusals"
 readme = "README.md"
 requires-python = ">=3.9"
 license = "Apache-2.0"
-license-files = ["LICENSE"]
+license-files = ["LICENSE", "NOTICE"]
 authors = [{name = "Tanvir Mahmud Mahim"}]
 dependencies = ["numpy>=1.22", "scipy>=1.8", "mpmath>=1.2"]
 classifiers = [
