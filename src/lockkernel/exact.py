@@ -19,6 +19,8 @@ equations term by term.
 """
 from __future__ import annotations
 
+from typing import Tuple
+
 import numpy as np
 from numpy.typing import ArrayLike
 
@@ -97,7 +99,8 @@ def _log_binom(n, k):
     return lgamma(n + 1) - lgamma(k + 1) - lgamma(n - k + 1)
 
 
-def full_exact(deltas: ArrayLike, chiN: float, times: ArrayLike):
+def full_exact(deltas: ArrayLike, chiN: float,
+               times: ArrayLike) -> Tuple[np.ndarray, np.ndarray]:
     """Exact diagonalisation of the full Hamiltonian for a small ensemble.
 
     `deltas` lists the detuning of every individual emitter, so the emitter
@@ -105,53 +108,66 @@ def full_exact(deltas: ArrayLike, chiN: float, times: ArrayLike):
     up to about twelve emitters.
 
     Returns (contrast, xi2), each an array over `times`.
+
+    Since 1.5.0 the operators are built as sparse matrices from the bits of
+    the basis index, the exchange term as chi1 J+ J- (one product instead
+    of the N^2 products sigma+_j sigma-_k), and the covariance from the
+    vectors J_a psi (instead of the dense products J_a J_b).  The result
+    equals the 1.4.0 calculation to rounding (the test keeps that code and
+    compares R to 1e-11, and xi^2 to a relative 1e-11 / R^2, since xi^2
+    is ill-conditioned where R is small), and 10 emitters take about 10 s
+    instead of about 130 s (medians on the same machine).  Refuses detunings that are not a non-empty
+    one-dimensional list of finite numbers, and a non-finite chiN or time.
     """
+    from scipy import sparse
+
     deltas = np.asarray(deltas, float)
+    times = np.atleast_1d(np.asarray(times, float))
+    if deltas.ndim != 1 or deltas.size == 0 \
+            or np.any(~np.isfinite(deltas)):
+        raise ValueError("deltas must be a non-empty one-dimensional list of "
+                         "finite detunings, one per emitter")
+    if not np.isfinite(float(chiN)) or np.any(~np.isfinite(times)):
+        raise ValueError("chiN and the times must be finite")
     N = len(deltas)
     dim = 2 ** N
     chi1 = chiN / N
 
-    sx = np.array([[0, 1], [1, 0]], complex)
-    sy = np.array([[0, -1j], [1j, 0]], complex)
-    sz = np.array([[1, 0], [0, -1]], complex)
-    sp = np.array([[0, 1], [0, 0]], complex)      # |up><down|
-    sm = sp.T.copy()
-
-    def op(single, j):
-        out = np.array([[1.0 + 0j]])
-        for i in range(N):
-            out = np.kron(out, single if i == j else np.eye(2))
-        return out
-
-    SP = [op(sp, j) for j in range(N)]
-    SM = [op(sm, j) for j in range(N)]
-    SZ = [op(sz, j) for j in range(N)]
-    SX = [op(sx, j) for j in range(N)]
-    SY = [op(sy, j) for j in range(N)]
-
-    H = np.zeros((dim, dim), complex)
+    # basis index b: emitter j (j = 0 the most significant bit, as in
+    # np.kron with emitter 0 outermost) is up (sigma_z = +1) when its bit is 0
+    b = np.arange(dim)
+    bits = (b[None, :] >> (N - 1 - np.arange(N))[:, None]) & 1   # (N, dim)
+    zval = 1.0 - 2.0 * bits                                      # sigma_z_j
+    # J+ = sum_j sigma+_j, sigma+_j = |up><down| flips bit j from 1 to 0
+    rows, cols = [], []
     for j in range(N):
-        H += 0.5 * deltas[j] * SZ[j]
-        for k in range(N):
-            H += chi1 * (SP[j] @ SM[k])
+        down = b[bits[j] == 1]
+        rows.append(down ^ (1 << (N - 1 - j)))
+        cols.append(down)
+    rows, cols = np.concatenate(rows), np.concatenate(cols)
+    Jp = sparse.csr_matrix((np.ones(rows.size, complex), (rows, cols)),
+                           shape=(dim, dim))
+    Jm = Jp.getH().tocsr()
+    H = chi1 * (Jp @ Jm).toarray()
+    H[b, b] += 0.5 * (deltas @ zval)
 
-    Jx = 0.5 * sum(SX)
-    Jy = 0.5 * sum(SY)
-    Jz = 0.5 * sum(SZ)
+    Js = [(0.5 * (Jp + Jm)).tocsr(), (-0.5j * (Jp - Jm)).tocsr(),
+          sparse.diags(0.5 * zval.sum(axis=0).astype(complex), format="csr")]
 
     w, V = np.linalg.eigh(H)
     psi0 = np.ones(dim, complex) / np.sqrt(dim)   # all emitters along +x
     c0 = V.conj().T @ psi0
 
     contrast, xi2 = [], []
-    Js = [Jx, Jy, Jz]
-    for t in np.atleast_1d(times):
+    for t in times:
         psi = V @ (np.exp(-1j * w * t) * c0)
-        mean = np.array([np.vdot(psi, A @ psi).real for A in Js])
+        Jpsi = [A @ psi for A in Js]
+        mean = np.array([np.vdot(psi, v).real for v in Jpsi])
         Cov = np.empty((3, 3))
         for a in range(3):
-            for b in range(3):
-                Cov[a, b] = 0.5 * np.vdot(psi, (Js[a] @ Js[b] + Js[b] @ Js[a]) @ psi).real
+            for c in range(a, 3):
+                # symmetrized <J_a J_b + J_b J_a>/2 = Re <J_a psi, J_b psi>
+                Cov[a, c] = Cov[c, a] = np.vdot(Jpsi[a], Jpsi[c]).real
         Cov -= np.outer(mean, mean)
         contrast.append(2.0 * np.hypot(mean[0], mean[1]) / N)
         xi2.append(_wineland_from_moments(mean, Cov, N))

@@ -76,9 +76,11 @@ gives a fold in the branch and therefore a hysteretic, first order onset.
 from __future__ import annotations
 
 import dataclasses
+import math
 from typing import List, Optional, Tuple
 
 import mpmath as mp
+import numpy as np
 
 from .kernels import Kernel, conservative
 from .lineshapes import LineShape
@@ -87,7 +89,8 @@ __all__ = ["G_of_Omega", "H_of_Omega", "branch_point", "threshold",
            "c_coefficient", "amplitude", "sweep", "extract_beta",
            "fold_interval", "tail_integral", "amplitude_general",
            "amplitude_curvature", "local_exponent", "branch_at_eps",
-           "branch_at_coupling", "eps_window"]
+           "branch_at_coupling", "eps_window", "BranchTable",
+           "branch_table"]
 
 INF = mp.inf
 
@@ -374,10 +377,25 @@ def tail_integral(line: LineShape, s) -> mp.mpf:
     working precision.  Before 1.3.0 the singular integrand was integrated
     directly: on a Lorentzian line I_s was 1.4 % too small at s = 2.9 and
     12 % at s = 2.95 (15 digits).
+
+    A line with compact support |delta| <= w (`box`) has a jump at its
+    edge, so p' is not a function there and the form above does not
+    apply.  Since 1.5.0 such a line is integrated in the direct form,
+    the part inside the support numerically and the part outside, where
+    p = 0, in closed form:
+
+        I_s = 2 int_0^w [p(0) - p(delta)] delta^-s d delta
+              + 2 p(0) w^(1-s) / (s-1).
+
+    For the box line the first part is zero and I_s = w^-s / (s-1).
+    Before 1.5.0 the integration by parts missed the jump: I_s came out
+    0 for the box line, and `amplitude_general` raised ZeroDivisionError.
     """
     s = mp.mpf(s)
     if not mp.isfinite(s) or s <= 1 or s >= 3:
         raise ValueError(f"I_s converges only for 1 < s < 3 (got s = {s})")
+    if line.compact_support is not None:
+        return _tail_integral_compact(line, s)
     sc = mp.mpf(line.scale)
     with mp.extradps(15):
         pp0 = mp.diff(line.pdf, mp.mpf(0), 2)
@@ -399,6 +417,38 @@ def tail_integral(line: LineShape, s) -> mp.mpf:
                    [0, 1])
     far = mp.quad(lambda x: x ** (1 - s) * q(x), [1, 10, 100, INF])
     return (2 / (s - 1)) * sc ** (-s) * (near + far)
+
+
+def _tail_integral_compact(line: LineShape, s) -> mp.mpf:
+    """I_s for a line with compact support |delta| <= w (since 1.5.0).
+
+    In x = delta / w the inner part is w^(1-s) int_0^1 [p(0) - p(w x)]
+    x^-s dx.  Near x = 0 the bracket is a cancellation of order x^2 on a
+    line with a rounded top, so it is formed with 2 log10(1/x) + 10 guard
+    digits, and replaced by -p''(0) (w x)^2 / 2 below x = 10^-(dps/2 + 5),
+    where the two agree to the working precision; x = t^(1/(3-s)) makes the
+    integrand finite at t = 0, as in `tail_integral`.  The quadrature nodes
+    stay inside (0, 1), so the value of the density exactly at the edge
+    never enters.  The outer part, where the density is zero, is
+    p(0) w^(1-s) / (s-1) exactly.
+    """
+    w = mp.mpf(line.compact_support)
+    with mp.extradps(15):
+        pp0 = mp.diff(line.pdf, mp.mpf(0), 2)
+    small = mp.mpf(10) ** (-(mp.mp.dps // 2 + 5))
+
+    def q(x):
+        if x < small:
+            return -pp0 * (w * x) ** 2 / 2
+        guard = 10 + int(mp.ceil(-2 * mp.log10(x)))
+        with mp.extradps(guard):
+            v = line.p0() - line.pdf(w * x)
+        return +v
+
+    m = 1 / (3 - s)
+    inner = mp.quad(lambda t: t ** (-m * s) * q(t ** m) * m * t ** (m - 1),
+                    [0, 1])
+    return 2 * w ** (1 - s) * (inner + line.p0() / (s - 1))
 
 
 def amplitude_general(line: LineShape, kernel: Kernel, C=None) -> mp.mpf:
@@ -844,3 +894,187 @@ def eps_window(line: LineShape, kernel: Kernel, rel_tol: float = 0.01,
         if gm == 0:
             break
     return eps_at[a], mp.mpf(10) ** a
+
+
+# ---------------------------------------------------------------------------
+# New in 1.5.0: the exact branch as a checked table, for fitting measured data
+# ---------------------------------------------------------------------------
+
+@dataclasses.dataclass(frozen=True)
+class BranchTable:
+    """The exact branch log R(log eps) of one model, as a checked table.
+
+    Made by `branch_table`.  Between its nodes the branch is a cubic
+    Hermite interpolant of y = log R in x = log eps, built from the exact
+    values and the exact local exponents dy/dx (`local_exponent`) at the
+    nodes; `max_error` is the largest |y_interp - y_exact|, the relative
+    error of R, found at the check points (one exact branch point inside
+    every interval, not used to build the interpolant).  Evaluated in
+    ordinary floating point, for fitting measured data
+    (`lockkernel.measured.fit_exact_branch`).
+
+    Attributes: model (a name), chi_c (the threshold 1/(p(0) m), float),
+    eps_min, eps_max (the range covered), x, y, slope (the nodes),
+    max_error, rel_tol (the tolerance it was built to).
+    """
+    model: str
+    chi_c: float
+    eps_min: float
+    eps_max: float
+    x: tuple
+    y: tuple
+    slope: tuple
+    max_error: float
+    rel_tol: float
+
+    def __post_init__(self):
+        from scipy.interpolate import CubicHermiteSpline
+        object.__setattr__(self, "_spline", CubicHermiteSpline(
+            list(self.x), list(self.y), list(self.slope)))
+
+    def log_R_and_slope(self, eps) -> Tuple[np.ndarray, np.ndarray]:
+        """(log R, d log R / d log eps) at the reduced couplings `eps`.
+
+        Refuses eps outside [eps_min, eps_max]: the table does not
+        extrapolate."""
+        e = np.asarray(eps, dtype=float)
+        lo, hi = self.eps_min * (1 - 1e-12), self.eps_max * (1 + 1e-12)
+        if np.any(~np.isfinite(e)) or np.any(e < lo) or np.any(e > hi):
+            raise ValueError(
+                f"eps outside the table's range {self.eps_min:.6g} .. "
+                f"{self.eps_max:.6g}: build the table over a wider range")
+        x = np.clip(np.log(e), self.x[0], self.x[-1])
+        return self._spline(x), self._spline(x, 1)
+
+    def R(self, eps) -> np.ndarray:
+        """The order parameter R on the branch at the reduced couplings
+        `eps` (float array), to a relative `max_error` or better at the
+        check points."""
+        return np.exp(self.log_R_and_slope(eps)[0])
+
+
+def _branch_GD(line: LineShape, kernel: Kernel, Omega):
+    """G(Omega) and D = G(0) - G(Omega), as `branch_point` computes them;
+    refuses a point at or below the threshold (D <= 0)."""
+    G = G_of_Omega(line, kernel, Omega)
+    D = _G0_minus_G(line, kernel, Omega)
+    if not D > 0:
+        raise ValueError(
+            f"eps = {mp.nstr(D / G, 5)} <= 0 at Omega = {mp.nstr(Omega, 5)}: "
+            "the branch bends back or is flat there (see fold_interval)")
+    return G, D
+
+
+def _branch_slope(line: LineShape, kernel: Kernel, Omega, G, D):
+    """d log R / d log eps at Omega, as `local_exponent` computes it;
+    refuses a point where the branch does not rise."""
+    Gp = _dG_dOmega_scaled(line, kernel, Omega)
+    slope = -(G + Omega * Gp) * D / (Omega * Gp * (G + D)) if Gp != 0 else 0
+    if not (Gp < 0 and slope > 0):
+        raise ValueError(
+            f"at Omega = {mp.nstr(Omega, 5)} the branch does not rise "
+            f"(dG/dOmega = {mp.nstr(Gp, 5)}): it folds or is flat (see "
+            "fold_interval), so R is not a single-valued, rising function "
+            "of eps")
+    return slope
+
+
+def branch_table(line: LineShape, kernel: Kernel, eps_min: float,
+                 eps_max: float, rel_tol: float = 1e-5,
+                 step: float = 0.5) -> BranchTable:
+    """Tabulate the exact branch R(eps) from eps_min to eps_max (new in 1.5.0).
+
+    For fitting a measured branch over its whole range with
+    `lockkernel.measured.fit_exact_branch`, beyond the window where it is
+    a power law.  The ends are found with `branch_at_eps`; nodes are
+    placed every `step` decades of Omega between them, and at each node
+    the exact (eps, R) and the exact local exponent d log R / d log eps
+    are computed (as `branch_point` and `local_exponent` compute them).
+    The interpolant is the cubic Hermite polynomial in x = log eps
+    through the values and slopes of y = log R at the two ends of each
+    interval.  Every interval is then checked at its midpoint in log
+    Omega against the exact branch point there, and halved until the
+    difference in log R (the relative error of R) is at most `rel_tol`;
+    a check point that fails becomes a node.  `max_error` reports the
+    largest difference found at the accepted check points.
+
+    The default rel_tol = 1e-5 is far below the noise of measured data
+    (`fit_exact_branch` refuses a table whose error exceeds 1 % of the
+    relative errors of R); a smaller one costs more nodes, roughly in
+    proportion to rel_tol^(-1/4).  Since R(eps) depends only on the shape
+    of the line and not on its width (scaling the line by a maps Omega to
+    a Omega and leaves the curve unchanged), one table serves every width.
+
+    Works at the current mpmath precision, at least 15 digits.  Needs a
+    differentiable line (not `box`) and a continuous onset on the range
+    (eps and R rising with Omega): a branch that folds or is flat is
+    refused.  Also refuses 0 < eps_min < eps_max not holding, a rel_tol
+    outside (0, 1e-3], a step outside (0, 2], and an interval that still
+    fails the check after being halved 30 times.
+    """
+    if line.compact_support is not None:
+        raise ValueError(
+            f"{line.name} has compact support (it is not differentiable at "
+            "its edge); branch_table uses the exact local exponent, which "
+            "needs p'")
+    lo, hi = mp.mpf(eps_min), mp.mpf(eps_max)
+    if not (mp.isfinite(lo) and mp.isfinite(hi) and 0 < lo < hi):
+        raise ValueError("need 0 < eps_min < eps_max, both finite")
+    tol = float(rel_tol)
+    if not (0 < tol <= 1e-3):
+        raise ValueError("rel_tol must be in (0, 1e-3]")
+    st = mp.mpf(step)
+    if not (mp.isfinite(st) and 0 < st <= 2):
+        raise ValueError("step must be in (0, 2] decades")
+    from scipy.interpolate import CubicHermiteSpline
+
+    with mp.workdps(max(mp.mp.dps, 15)):
+        kern = _memo_kernel(kernel)
+        L_lo = mp.log10(branch_at_eps(line, kern, lo)[3])
+        L_hi = mp.log10(branch_at_eps(line, kern, hi)[3])
+        n = int(mp.ceil((L_hi - L_lo) / st)) + 1
+        grid = [L_lo + (L_hi - L_lo) * mp.mpf(i) / (n - 1) for i in range(n)]
+        nodes = {}
+
+        def node(L, GD=None):
+            Om = mp.mpf(10) ** L
+            G, D = GD or _branch_GD(line, kern, Om)
+            b = _branch_slope(line, kern, Om, G, D)
+            nodes[L] = (float(mp.log(D / G)), float(mp.log(Om * G)), float(b))
+
+        for L in grid:
+            node(L)
+        todo = [(grid[i], grid[i + 1], 0) for i in range(n - 1)]
+        worst = 0.0
+        while todo:
+            La, Lb, depth = todo.pop()
+            (xa, ya, da), (xb, yb, db) = nodes[La], nodes[Lb]
+            if not xa < xb:
+                raise ValueError("eps does not rise with Omega on this range: "
+                                 "the branch folds (see fold_interval)")
+            # check point: the exact branch point at the midpoint in log
+            # Omega (the slope is computed only if it becomes a node)
+            Lm = (La + Lb) / 2
+            Om = mp.mpf(10) ** Lm
+            G, D = _branch_GD(line, kern, Om)
+            xm, ym = float(mp.log(D / G)), float(mp.log(Om * G))
+            if not xa < xm < xb:
+                raise ValueError("eps does not rise with Omega on this range: "
+                                 "the branch folds (see fold_interval)")
+            err = abs(float(CubicHermiteSpline([xa, xb], [ya, yb],
+                                               [da, db])(xm)) - ym)
+            if err <= tol:
+                worst = max(worst, err)
+            elif depth >= 30:
+                raise ValueError(
+                    f"the table did not reach rel_tol = {tol:g} near eps = "
+                    f"{mp.nstr(mp.exp(xm), 5)} after 30 halvings")
+            else:
+                node(Lm, (G, D))
+                todo += [(La, Lm, depth + 1), (Lm, Lb, depth + 1)]
+        pts = [nodes[L] for L in sorted(nodes)]
+        chi_c = float(threshold(line, kern))
+    x, y, d = (tuple(v) for v in zip(*pts))
+    return BranchTable(model=f"{line.name}/{kernel.name}", chi_c=chi_c,
+                       eps_min=math.exp(x[0]), eps_max=math.exp(x[-1]),
+                       x=x, y=y, slope=d, max_error=worst, rel_tol=tol)

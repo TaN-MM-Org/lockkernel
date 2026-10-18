@@ -52,6 +52,12 @@ error bar costs.  `plan_fit` and `points_for_fit` do the same for the
 three-parameter fit `fit_branch` actually performs, where the
 threshold is fitted too.
 
+`fit_exact_branch` (new in 1.5.0) fits the exact branch of a model, a
+line and a kernel tabulated by `lockkernel.parametric.branch_table`,
+over the whole measured range, beyond the power-law window, with the
+coupling scale (and optionally the R scale) free: a test of the model
+and a calibration of the coupling.
+
 Honest limits: the power law is the LEADING near-threshold behavior;
 data taken far above threshold bend away from it and bias beta -- fit
 what is near the onset (the eps_max refusal guards the worst of it,
@@ -64,16 +70,20 @@ from __future__ import annotations
 
 import dataclasses
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import TYPE_CHECKING, Optional, Tuple
 
 import numpy as np
 from numpy.typing import ArrayLike
 from scipy import stats
 from scipy.optimize import least_squares
 
+if TYPE_CHECKING:                       # pragma: no cover
+    from .parametric import BranchTable
+
 __all__ = ["BranchFit", "fit_branch", "kernel_tail_from_beta",
            "beta_relative_sigma", "points_for_beta", "FitPlan", "plan_fit",
-           "points_for_fit", "with_calibration"]
+           "points_for_fit", "with_calibration", "ExactBranchFit",
+           "fit_exact_branch"]
 
 # search limits of the exponent in `fit_branch`
 _BETA_MIN, _BETA_MAX = 0.05, 20.0
@@ -625,18 +635,21 @@ def points_for_fit(target_sigma_beta: float, eps_min: float, eps_max: float,
         return plan_fit(n, eps_min, eps_max, beta, sigma_log,
                         fit_threshold).sigma_beta
 
-    lo = 6 if fit_threshold else 3
+    lo, cap = (6 if fit_threshold else 3), 10 ** 7
     if sb(lo) <= tgt:
         return lo, plan_fit(lo, eps_min, eps_max, beta, sigma_log,
                             fit_threshold)
     hi = lo
     while sb(hi) > tgt:
-        lo, hi = hi, 2 * hi
-        if hi > 10 ** 7:
+        # the doubling stops at the cap itself (before 1.5.0 it went from
+        # 6291456 points straight past 10^7 and refused every target that
+        # needs between 6291457 and 10^7 points)
+        if hi == cap:
             raise ValueError(
                 "over 10^7 points would be needed: the target is out "
                 "of reach at this noise and range; widen the range "
                 "or reduce the noise")
+        lo, hi = hi, min(2 * hi, cap)
     while hi - lo > 1:      # sb(lo) > tgt >= sb(hi)
         mid = (lo + hi) // 2
         if sb(mid) > tgt:
@@ -645,3 +658,200 @@ def points_for_fit(target_sigma_beta: float, eps_min: float, eps_max: float,
             hi = mid
     return hi, plan_fit(hi, eps_min, eps_max, beta, sigma_log,
                         fit_threshold)
+
+
+# ---------------------------------------------------------------------------
+# New in 1.5.0: fit the exact branch of a model, over the whole range
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class ExactBranchFit:
+    """A measured branch fitted with the exact branch of one model.
+
+    See `fit_exact_branch`.  chi_scale is the factor k that turns a
+    recorded coupling into the model's chiN (chiN = k chi), r_scale the
+    factor q between measured and model R (R_meas = q R_model, 1 if not
+    fitted), with their 1-sigma errors; chi_c = chi_c_model / k, the
+    threshold in the recorded units, and its error.  chi2, dof and
+    p_value test the model over the whole range (chi2 and p_value are None
+    without sigma_r).  eps_range is the (smallest, largest) fitted eps =
+    k chi / chi_c_model - 1; residual_rms_log the root-mean-square misfit
+    in log R; model and table_error come from the `BranchTable`.
+    """
+    model: str
+    chi_scale: float
+    sigma_chi_scale: float
+    r_scale: float
+    sigma_r_scale: float
+    chi_c: float
+    sigma_chi_c: float
+    n_points: int
+    dof: int
+    chi2: Optional[float]
+    p_value: Optional[float]
+    eps_range: tuple
+    residual_rms_log: float
+    table_error: float
+    reference: str
+
+
+def fit_exact_branch(chi: ArrayLike, r: ArrayLike, reference: str,
+                     table: "BranchTable",
+                     sigma_r: Optional[ArrayLike] = None,
+                     fit_r_scale: bool = False) -> ExactBranchFit:
+    """Fit measured points with the exact branch of a model (new in 1.5.0).
+
+    `fit_branch` fits the power law R = A eps^beta, which holds only near
+    the threshold (`lockkernel.parametric.eps_window` says how near).
+    This fits the exact branch of one model, a line and a kernel, over
+    the whole measured range instead, tabulated by
+    `lockkernel.parametric.branch_table`.  The free parameter is the
+    coupling scale k, chiN = k chi, which turns the recorded couplings (a
+    pump power, a field, a voltage) into the model's chiN; with
+    fit_r_scale=True also an R scale q, R_meas = q R_model (a detection
+    efficiency).  The model then predicts
+
+        log R_i = log q + log R_model(k chi_i / chi_c_model - 1),
+
+    and the fit minimizes the weighted squares in log R, as `fit_branch`
+    does (weights sigma_r / r; without sigma_r the scatter sets the error
+    scale).  Its chi2 and p-value test the model, line and kernel
+    together, over all the points: a model with the wrong exponent, or
+    the wrong bend beyond the power-law window, is rejected.  The
+    threshold in recorded units follows as chi_c_model / k.
+
+    chi : recorded couplings, finite, positive, strictly increasing.
+    r : measured order parameters, finite and > 0.
+    reference : where the data come from (mandatory, >= 8 characters).
+    table : a `BranchTable` from `branch_table`, covering every eps the
+        fit needs.
+    sigma_r : absolute 1-sigma errors of r (same shape), optional.
+    fit_r_scale : also fit the R scale q (default False: q = 1).
+
+    Error bars are the asymptotic ones, (J^T J)^-1 with the exact
+    Jacobian (d log R / d log k = (1 + eps)/eps times the local exponent
+    from the table).  Refuses: fewer than 5 points; inputs as in
+    `fit_branch`; couplings whose ratio chi_n / chi_1 is larger than the
+    table can hold, (1 + eps_max)/(1 + eps_min); a best fit at the edge
+    of the table's range (build the table wider); a fit that does not
+    converge; and a table whose interpolation error (`max_error`) is more
+    than 1 % of the smallest relative error of R (with sigma_r) or of
+    the rms misfit (without), where it could bias the fit.
+    """
+    _check_reference(reference)
+    x = np.asarray(chi, dtype=float)
+    y = np.asarray(r, dtype=float)
+    if x.ndim != 1 or y.ndim != 1:
+        raise ValueError("chi and r must be one-dimensional sequences")
+    if x.size < 5 or x.size != y.size:
+        raise ValueError("need >= 5 (chi, R) points of equal length")
+    if np.any(~np.isfinite(x)) or np.any(np.diff(x) <= 0.0) or x[0] <= 0.0:
+        raise ValueError("couplings must be finite, positive and strictly "
+                         "increasing")
+    if np.any(~np.isfinite(y)) or np.any(y <= 0.0):
+        raise ValueError("order parameters must be finite and > 0: points "
+                         "below threshold (R = 0) carry no information on "
+                         "the branch; drop them")
+    if sigma_r is not None:
+        sy = np.asarray(sigma_r, dtype=float)
+        if sy.shape != y.shape or np.any(~np.isfinite(sy)) \
+                or np.any(~(sy > 0.0)):
+            raise ValueError("sigma_r must be finite and positive on the "
+                             "same grid as r")
+        w = sy / y
+        if table.max_error > 0.01 * np.min(w):
+            raise ValueError(
+                f"the table's interpolation error {table.max_error:.2g} is "
+                f"more than 1 % of the smallest relative error of R "
+                f"({np.min(w):.2g}); rebuild it with a smaller rel_tol")
+    else:
+        w = np.ones_like(y)
+    ly = np.log(y)
+    chi_c = float(table.chi_c)
+    # log k such that every point lies inside the table's eps range
+    lk_lo = np.log(chi_c * (1.0 + table.eps_min) / x[0])
+    lk_hi = np.log(chi_c * (1.0 + table.eps_max) / x[-1])
+    if not lk_lo < lk_hi:
+        raise ValueError(
+            f"the couplings span a ratio {x[-1] / x[0]:.6g}, but the table "
+            f"covers only (1 + eps_max)/(1 + eps_min) = "
+            f"{(1 + table.eps_max) / (1 + table.eps_min):.6g}: build it "
+            "over a wider eps range")
+    nfree = 2 if fit_r_scale else 1
+
+    def model(lk):
+        eps = np.exp(lk) * x / chi_c - 1.0
+        lr, slope = table.log_R_and_slope(eps)
+        return eps, lr, slope
+
+    def profile_lq(lr):
+        # the best log q for given model values (weighted mean; lr may
+        # carry one row per trial log k)
+        if not fit_r_scale:
+            return np.zeros(np.shape(lr)[:-1])
+        return np.sum((ly - lr) / w ** 2, axis=-1) / np.sum(1.0 / w ** 2)
+
+    def resid(p):
+        _, lr, _ = model(p[0])
+        lq = p[1] if fit_r_scale else 0.0
+        return (lq + lr - ly) / w
+
+    def jac(p):
+        eps, _, slope = model(p[0])
+        cols = [slope * (1.0 + eps) / eps / w]
+        if fit_r_scale:
+            cols.append(1.0 / w)
+        return np.stack(cols, axis=1)
+
+    # start: the best of a scan over the allowed log k (one row per trial)
+    span = lk_hi - lk_lo
+    grid = lk_lo + span * (np.arange(401) + 0.5) / 401
+    lr = table.log_R_and_slope(np.exp(grid)[:, None] * x / chi_c - 1.0)[0]
+    costs = np.sum(((profile_lq(lr)[:, None] + lr - ly) / w) ** 2, axis=1)
+    i0 = int(np.argmin(costs))
+    p0 = [grid[i0]] + ([float(profile_lq(lr[i0]))] if fit_r_scale else [])
+    bounds = ([lk_lo] + [-np.inf] * (nfree - 1),
+              [lk_hi] + [np.inf] * (nfree - 1))
+    out = least_squares(resid, p0, jac=jac, bounds=bounds, x_scale="jac")
+    if not out.success:
+        raise ValueError(f"the exact-branch fit did not converge: "
+                         f"{out.message}")
+    lk = float(out.x[0])
+    if min(lk - lk_lo, lk_hi - lk) <= 1e-6 * span:
+        eps_edge = np.exp(lk) * x / chi_c - 1.0
+        raise ValueError(
+            f"the best coupling scale puts the points at the edge of the "
+            f"table's range (eps from {eps_edge[0]:.4g} to {eps_edge[-1]:.4g},"
+            f" table {table.eps_min:.4g} .. {table.eps_max:.4g}): build the "
+            "table over a wider range")
+    res = out.fun
+    J = jac(out.x)
+    try:
+        cov = np.linalg.inv(J.T @ J)
+    except np.linalg.LinAlgError:
+        raise ValueError("the fit covariance is singular: the data do not "
+                         "constrain the scales")
+    dof = x.size - nfree
+    chi2 = float(res @ res)
+    rms = float(np.sqrt(np.mean((res * w) ** 2)))
+    if sigma_r is None:
+        cov = cov * chi2 / dof
+        if table.max_error > 0.01 * rms:
+            raise ValueError(
+                f"the table's interpolation error {table.max_error:.2g} is "
+                f"more than 1 % of the rms misfit ({rms:.2g}); rebuild it "
+                "with a smaller rel_tol")
+    sig = np.sqrt(np.diag(cov))
+    k = float(np.exp(lk))
+    q = float(np.exp(out.x[1])) if fit_r_scale else 1.0
+    eps = k * x / chi_c - 1.0
+    return ExactBranchFit(
+        model=str(table.model), chi_scale=k, sigma_chi_scale=k * float(sig[0]),
+        r_scale=q, sigma_r_scale=q * float(sig[1]) if fit_r_scale else 0.0,
+        chi_c=chi_c / k, sigma_chi_c=chi_c / k * float(sig[0]),
+        n_points=int(x.size), dof=int(dof),
+        chi2=chi2 if sigma_r is not None else None,
+        p_value=(float(stats.chi2.sf(chi2, dof)) if sigma_r is not None
+                 else None),
+        eps_range=(float(eps[0]), float(eps[-1])), residual_rms_log=rms,
+        table_error=float(table.max_error), reference=reference)
