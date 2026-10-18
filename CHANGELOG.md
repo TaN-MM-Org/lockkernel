@@ -5,6 +5,107 @@ form, an exact identity, high-precision quadrature against
 independent closed forms, or seeded simulation; the release notes on
 GitHub carry the full anchor lists.
 
+## 1.5.0 (2026-10-18)
+
+### Added
+
+- `parametric.branch_table(line, kernel, eps_min, eps_max, rel_tol=1e-5,
+  step=0.5)` and its result `BranchTable`: the exact branch `R(eps)` of
+  one model as a checked table, evaluated in floating point (`R(eps)`,
+  `log_R_and_slope(eps)`). Between nodes it is the cubic Hermite
+  interpolant of `log R` in `log eps` through the exact values and the
+  exact local exponents; each interval is checked against an exact
+  branch point at its middle (in `log Omega`) and halved until they
+  differ by at most `rel_tol`, and `max_error` reports the largest
+  difference found. Tests: Lorentzian line, Kuramoto kernel, against
+  `R = sqrt(eps/(1+eps))` at 3001 points from `eps = 1e-4` to 1 (within
+  2 `rel_tol`, `rel_tol = 1e-7`; observed 0.96 `rel_tol`), node slopes
+  against `(1/2)/(1+eps)` (1e-12); Gaussian line, Kuramoto kernel,
+  against `G = p(0) (pi/2) e^-z (I0(z) + I1(z))`, `z = Omega^2/(4
+  sigma^2)`, derived in the test from the integral representation of
+  the modified Bessel functions and checked there against 40-digit
+  quadrature (2e-7 at 25 points). Refuses lines with
+  compact support, folded or flat branches, bad ranges and tolerances,
+  and evaluation outside its range.
+- `measured.fit_exact_branch(chi, r, reference, table, sigma_r=None,
+  fit_r_scale=False)` (also at the top level) and its result
+  `ExactBranchFit`: fits the exact branch of a model to measured points
+  over their whole range, not only where the power law holds. The free
+  parameter is the coupling scale `k` (`chiN = k chi`, for couplings
+  recorded as a power, a field or a voltage), optionally also an `R`
+  scale `q`; it returns them with error bars, the threshold in the
+  recorded units, and `chi2`, `dof` and `p_value`, which test the line
+  and kernel over all the points. Tests: an independent SciPy fit of
+  the same data with the closed-form branch (parameters and chi2 within
+  bounds derived from the table error, error bars to 1e-4); 400 seeded
+  fits (scatter of `log k` and `log q` against the median error bar:
+  observed ratios 1.03 and 0.99, required within 12 %; mean chi2 10.03
+  for 10 dof); Kuramoto data over `eps = 1e-3 .. 0.5` reject the
+  conservative kernel's branch (`p < 1e-10`) and accept their own,
+  while `fit_branch`'s power law on the same points is biased (beta
+  0.465 +- 0.002 against 1/2) and rejected (`p = 4e-20`). Refuses fewer
+  than 5 points, couplings spanning more than the table holds, a best
+  fit at the table's edge, and a table whose error exceeds 1 % of the
+  relative errors of `R`.
+- Tests for `tail_integral` on lines with compact support (box and a
+  semicircle line, closed forms derived in the test), for `full_exact`
+  against the 1.4.0 code, and for the new functions: 194 tests (from
+  172).
+
+### Fixed
+
+- `tail_integral`, and so `amplitude_general`, on a line with compact
+  support: the integration by parts of `-p'` missed the jump of the
+  `box` line at its edge. Before -> after, box of half width 1, 15
+  digits: `I_s` 0 -> 2 at `s = 1.5` (closed form `1/(s-1)`; 0 at every
+  `s` before), and `amplitude_general(box(1.0), power_tail(2.5))`
+  `ZeroDivisionError` -> 2.08481122566036 (the closed form, to 1e-13).
+  Such a line is now integrated in the direct form, inside the support
+  with guard digits and outside in closed form. Every earlier release
+  had this error. Tests: `test_tail_integral_on_compact_lines`,
+  `test_general_amplitude_on_the_box_line`.
+- `points_for_fit` refused every target that needs between 6291457 and
+  10^7 points ("over 10^7 points would be needed"): its doubling went
+  from 6291456 straight past 10^7. It now stops at 10^7, as
+  `points_for_beta` does. Before -> after:
+  `points_for_fit(1.3297e-5, 1e-4, 1e-2, beta=1, sigma_log=0.05,
+  fit_threshold=False)` refused -> 8000001 points (closed form 8000000;
+  `plan_fit` agrees with it to about 1e-7 at that size). Test:
+  `test_points_for_fit_reaches_the_cap` (with the error bar in closed
+  form, so that millions of points cost nothing).
+
+### Changed
+
+- `full_exact` refuses detunings that are not a non-empty
+  one-dimensional list of finite numbers, and a non-finite `chiN` or
+  time.
+- All 172 earlier tests pass (the version check now expects 1.5.0), and
+  README examples 1 to 12 print the same as with 1.4.0.
+
+### Performance
+
+- `full_exact` builds `J+` as a sparse matrix from the bits of the basis
+  index, the exchange term as `chi1 J+ J-` (one product instead of `N^2`
+  dense products) and the covariance from the vectors `J_a psi`:
+  8 emitters 1.60 s -> 0.104 s (15x) and 10 emitters 133 s ->
+  10.3 s (13x), medians of 5 and 3 runs on the same (busy) machine.
+  The test suite's slowest test (`full_exact` at 10 emitters against the
+  cumulant solver) went from about 97 s to about 6 s. Equality is
+  checked against the 1.4.0 code, kept in the test, with tolerances
+  derived from rounding: `R` to 1e-11 and `xi^2` to a relative
+  `1e-11/R^2` (`test_full_exact_same_as_1_4_0`; observed differences
+  below 1e-14 in `R`).
+
+### Tutorials
+
+- `examples/tutorial_whole_branch.py`: synthetic data over `eps = 0.002
+  .. 0.5`, where the power law fails; `branch_table` and
+  `fit_exact_branch` keep the right line (Gaussian, `p = 0.54`) and
+  reject the wrong one (Lorentzian), and calibrate the coupling scale,
+  the threshold in volts and the `R` scale. It prints the output quoted
+  in the README, which `tests/test_tutorials.py` checks along with the
+  truth of its synthetic data.
+
 ## 1.4.0 (2026-10-17)
 
 ### Added

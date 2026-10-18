@@ -38,6 +38,9 @@ carries the uncertainties of the measured couplings and of calibration
 scales into the error bars. Since 1.4.0 it also answers the planning
 questions in theory terms: what `R` a model gives at the coupling you
 set, and how far above the threshold the onset is still a power law.
+Since 1.5.0 it can also fit a measured onset over its whole range with
+the exact branch of a model, not only the power law near the threshold.
+That tests the model and calibrates the coupling scale.
 When the data cannot
 support the number asked for, it stops with an error message that says
 why, rather than returning a number that looks fine but is not.
@@ -47,7 +50,7 @@ why, rather than returning a number that looks fine but is not.
 - [A short guide to the words used here](#a-short-guide-to-the-words-used-here)
 - [Install and conventions](#install-and-conventions)
 - [Examples](#examples) (each with the output it prints)
-- [Tutorials](#tutorials) (two worked lab analyses, from data to result)
+- [Tutorials](#tutorials) (three worked lab analyses, from data to result)
 - [What is in the package](#what-is-in-the-package)
 - [When it refuses, and why](#when-it-refuses-and-why)
 - [How the results are checked](#how-the-results-are-checked)
@@ -140,8 +143,8 @@ and mpmath 1.2 or newer, and nothing else.
 ## Examples
 
 Each example below runs as written, and the output shown is what it
-printed with lockkernel 1.4.0 (examples 1 to 11 print the same as with
-1.3.0). Line widths, couplings and noise levels are illustrative
+printed with lockkernel 1.5.0 (examples 1 to 12 print the same as with
+1.4.0). Line widths, couplings and noise levels are illustrative
 values, not taken from any experiment.
 
 ### 1. Threshold and exponent from the theory
@@ -657,7 +660,7 @@ points from `plan_fit` (tutorial 2 does both).
 
 ## Tutorials
 
-Two worked analyses live in [`examples/`](examples). Each makes a
+Three worked analyses live in [`examples/`](examples). Each makes a
 seeded synthetic measurement with the package's exact branch, analyzes
 it the way you would analyze real data, and prints the result with its
 uncertainty. Each runs in under about 20 s, and a test checks that
@@ -706,6 +709,38 @@ kernel tail s = 2.00 +- 0.01 (conservative spins: s = 2)
 fit up to eps = 0.5:    beta = 0.9554 +- 0.0027, chi2 = 180.7 for 13 dof, p = 1.2e-31
 ```
 
+### Tutorial 3: the whole branch, a model test and the coupling calibration
+
+[`examples/tutorial_whole_branch.py`](examples/tutorial_whole_branch.py)
+(new in 1.5.0). Overdamped oscillators (Kuramoto kernel) with a
+Gaussian spread of natural frequencies. The coupling is recorded as a
+drive voltage, and the factor `k` that turns volts into `chiN` is not
+known. The synthetic data are 12 points from `eps = 0.002` to
+`eps = 0.5`, with 1 % noise on `R`. The power law of `fit_branch`
+holds only near the threshold, so over this range it gives a biased
+exponent, and its chi-square test rejects it. `branch_table` and
+`fit_exact_branch` fit the exact branch of a model to all the points,
+with `k` free. Of two candidate lines, the Gaussian one fits and the
+Lorentzian one is rejected (`p = 0` means a probability below the
+smallest floating-point number). The accepted model then gives `k`, the
+threshold in volts and, with the `R` scale free as well, a check of
+the `R` calibration.
+
+```
+power law, all 12 points: beta = 0.4115 +- 0.0024, chi2 = 276.4 for 9 dof, p = 2.6e-54
+exact branch, Kuramoto kernel, Gaussian line:   chi2 = 9.9 for 11 dof, p = 0.54
+exact branch, Kuramoto kernel, Lorentzian line: chi2 = 16065.0 for 11 dof, p = 0
+coupling scale k = 0.037101 +- 0.000001 per volt (true 0.0371)
+threshold chi_c = 18.2653 +- 0.0005 V (true 18.2658 V)
+with the R scale free: q = 1.0005 +- 0.0035, threshold 18.2654 +- 0.0006 V
+```
+
+The shape of `R(eps)` depends only on the shape of the line, not on its
+width, so the model test does not need the width. The width enters
+only `k` (through the model's threshold `1/(p(0) m)`); here it is taken
+as measured separately. `fit_exact_branch` does not take coupling
+errors (`sigma_chi`); see [Limits](#limits).
+
 ## What is in the package
 
 The top level imports the `measured` names below and the submodules
@@ -749,7 +784,8 @@ directly.
   number `c` whose sign sets the order of the onset, and the amplitude
   `A = pi p(0)^2 / c`.
 - `tail_integral`, `amplitude_general` -- the amplitude for a kernel
-  with tail exponent `1 < s < 3`.
+  with tail exponent `1 < s < 3` (since 1.5.0 also on a line with
+  compact support, such as `box`).
 - `amplitude_curvature` -- the amplitude when `beta = 1/2` (no tail,
   or a tail `s > 3`, on a line with a rounded top; example 7).
 - `fold_interval` -- samples the branch and, if it folds back, returns
@@ -762,6 +798,15 @@ directly.
   slope `d log R / d log eps`; `eps_window(line, kernel, rel_tol=0.01)`
   -- the largest `eps` (and its `Omega`) up to which that slope stays
   within `rel_tol` of `beta`.
+- New in 1.5.0 (tutorial 3): `branch_table(line, kernel, eps_min,
+  eps_max, rel_tol=1e-5)` -- the exact branch `R(eps)` from `eps_min` to
+  `eps_max` as a checked table (a `BranchTable`), evaluated in ordinary
+  floating point with `R(eps)` and `log_R_and_slope(eps)`. Between nodes
+  it is a cubic Hermite interpolant of `log R` in `log eps`, built from
+  the exact values and exact local exponents. Each interval is checked
+  against an exact branch point at its middle and halved until they
+  differ by at most `rel_tol` in `log R`; `max_error` reports the
+  largest difference found.
 
 **Fitting measured data** (`lockkernel.measured`, also at the top level)
 
@@ -777,6 +822,15 @@ directly.
   fit with the relative uncertainties of an overall coupling scale and
   an overall `R` scale added to the error bars of `chi_c` and `A`
   (example 11).
+- New in 1.5.0 (tutorial 3): `fit_exact_branch(chi, r, reference,
+  table, sigma_r=None, fit_r_scale=False)` -- fits the exact branch of a
+  model (a `BranchTable`) to measured points over their whole range.
+  The free parameter is the coupling scale `k` (`chiN = k chi`), and
+  with `fit_r_scale=True` also an `R` scale `q`. It returns an
+  `ExactBranchFit` with `chi_scale`, `r_scale`, the threshold `chi_c` in
+  the recorded units, their errors, `chi2`, `dof` and `p_value` (the
+  last two `None` without `sigma_r`), `eps_range`, `residual_rms_log`
+  and `table_error`.
 - `kernel_tail_from_beta(beta, sigma_beta=0, n_sigma=2)` -- the tail
   exponent `s` and its error.
 - `beta_relative_sigma(n_points, decades, sigma_log)`,
@@ -806,7 +860,9 @@ directly.
 - `class_table`, `build_system` -- turn a line shape into a finite
   set of detuning classes that keeps the whole population.
 - `symmetric_exact` (all detunings equal, any number of emitters),
-  `full_exact` (full quantum problem, up to about twelve emitters) and
+  `full_exact` (full quantum problem, up to about twelve emitters; since
+  1.5.0 it builds sparse operators, and 10 emitters take about 10 s
+  instead of about 130 s) and
   `class_exact` (emitters grouped by detuning, a few tens) -- exact
   references. `class_exact` is tested against `full_exact` since 1.3.0.
 
@@ -877,6 +933,22 @@ gives its inputs and conventions.
   branch does not rise; `eps_window` finds the local exponent outside
   the band already at the start of its search, or gets `rel_tol`
   outside `(0, 1)`;
+- (new in 1.5.0) `branch_table` gets a line with compact support, a
+  range that is not `0 < eps_min < eps_max`, a `rel_tol` outside
+  `(0, 1e-3]` or a `step` outside `(0, 2]` decades, meets a branch that
+  folds or is flat, or cannot reach `rel_tol` after halving an interval
+  30 times; a `BranchTable` is asked for `R` outside its range (it does
+  not extrapolate);
+- (new in 1.5.0) `fit_exact_branch` gets fewer than 5 points, couplings
+  or order parameters that fail the checks of `fit_branch`, couplings
+  that span a larger ratio than the table can hold, a best fit at the
+  edge of the table's range (build the table wider), a fit that does not
+  converge, or a table whose `max_error` is more than 1 % of the
+  smallest relative error of `R` (of the rms misfit without `sigma_r`),
+  where the table could bias the fit;
+- (new in 1.5.0) `full_exact` gets detunings that are not a non-empty
+  one-dimensional list of finite numbers, or a non-finite `chiN` or
+  time;
 - `amplitude_general` is asked for a kernel without a tail in
   `1 < s < 3`, or (new in 1.3.0) its default tail amplitude `C`, read
   off the kernel at `|u| = 10^6`, differs by more than a relative 1e-6
@@ -890,7 +962,7 @@ gives its inputs and conventions.
 
 ## How the results are checked
 
-172 automated tests run on every push and pull request, on Python 3.9
+194 automated tests run on every push and pull request, on Python 3.9
 to 3.14, and once more on Python 3.10 with the oldest NumPy (1.22.0),
 SciPy (1.8.0) and mpmath (1.2.1) the package allows. The numerical
 checks compare the package with something independent of it: a closed
@@ -1037,6 +1109,49 @@ independent implementation, or the 1.3.0 code path)
 - The two tutorials run and print what this README shows, and their
   results agree with the truth of their synthetic data.
 
+**New in 1.5.0** (15 digits unless stated; every reference is a closed
+form derived in the test, an independent SciPy fit, seeded simulation,
+or the 1.4.0 code path)
+
+- `tail_integral` on lines with compact support: the box line against
+  `w^-s/(s-1)`, and a semicircle line against
+  `-(2/pi) B((1-s)/2, 3/2) w^-s` (a Beta integral continued
+  analytically), for widths 0.001, 1 and 1000 and `s` from 1.1 to 2.99,
+  to a relative 1e-13; at `s = 2` both equal `pi c` from the direct
+  integral of `c_coefficient`. `amplitude_general` on the box line with
+  `s` = 1.5 and 2.5 against its closed form, and against the limit
+  `R/eps^(1/(s-1))` of the closed-form branch at `Omega = 1e-40` (60
+  digits), to 1e-13.
+- `branch_table` on the Lorentzian line with the Kuramoto kernel against
+  `R = sqrt(eps/(1+eps))` at 3001 points from `eps = 1e-4` to 1, within
+  twice its `rel_tol` of 1e-7; its node values to 1e-13 and node slopes
+  against `(1/2)/(1+eps)` to 1e-12. On a Gaussian line with the Kuramoto
+  kernel, against `G = p(0) (pi/2) e^-z (I0(z) + I1(z))`,
+  `z = Omega^2/(4 sigma^2)` (derived in the test from the integral
+  representation of the modified Bessel functions, and checked there
+  against 40-digit quadrature), at 25 points to 2e-7.
+- `fit_exact_branch` against an independent SciPy fit of the same data
+  with the closed-form branch: the coupling scale, the `R` scale and
+  chi2 agree within bounds derived from the table's error, and the
+  error bars to a relative 1e-4. Over 400 seeded fits, the scatter of
+  `log k` and `log q` matches the median error bar within 12 %
+  (observed: 3 % and 1 %), the means are unbiased and `chi2` averages
+  to `dof`. Kuramoto data from `eps = 1e-3` to 0.5 reject the
+  conservative kernel's branch (`p < 1e-10`) and accept their own
+  (`p > 0.01`), while `fit_branch`'s power law on the same points is
+  rejected and more than 10 error bars off. Without `sigma_r` the error
+  bars are the residual-scaled ones.
+- `points_for_fit` reaches its cap: targets that need 6291457, 8000000
+  and 10^7 points get those counts, with the error bar in closed form
+  (see [Corrections](#corrections-in-earlier-versions)).
+- `full_exact` against the 1.4.0 code (kept in the test), for four sets
+  of up to 8 emitters and times up to 11: `R` to 1e-11 and `xi^2` to a
+  relative `1e-11/R^2` (`xi^2` is ill-conditioned where `R` is small).
+- The three tutorials run and print what this README shows. In
+  tutorial 3 the right model is kept and the wrong line rejected, and
+  `k`, the threshold and the `R` scale come out within three error
+  bars of their true values.
+
 **The exponent rule** (25 digits, Gaussian line, `Omega` down to 1e-6)
 
 - `beta = 1/(s-1)` or 1/2 for the kernel family with `s` = 1.5, 1.8,
@@ -1096,6 +1211,28 @@ independent implementation, or the 1.3.0 code path)
   and stays below 0.05 at 0.6 times the threshold.
 
 ## Corrections in earlier versions
+
+**1.5.0 fixed two errors.** Numbers are at mpmath's default 15 digits.
+
+- `tail_integral`, and so `amplitude_general`, was wrong on a line with
+  compact support. It integrates `-p'` by parts, which misses the jump
+  of the `box` line at its edge: on a box of half width 1, `I_s` came
+  out 0 at every `s` (the closed form is `1/(s-1)`, so 2 at `s = 1.5`),
+  and `amplitude_general(box(1.0), power_tail(2.5))` raised
+  `ZeroDivisionError` (the closed form is 2.08481122566036). Such a
+  line is now integrated in the direct form, with the part outside the
+  support in closed form. Every earlier release had this error.
+- `points_for_fit` refused targets that need between 6291457 and 10^7
+  points, saying that over 10^7 would be needed: its search doubled the
+  number of points from 6291456 straight past 10^7. For example,
+  `points_for_fit(1.3297e-5, 1e-4, 1e-2, beta=1, sigma_log=0.05,
+  fit_threshold=False)` was refused and now returns 8000001 points
+  (the closed form of `beta_relative_sigma` gives 8000000; at 8 million
+  points `plan_fit` agrees with it to about 1e-7). Searching that far
+  takes about 100 s.
+
+All 172 earlier tests pass (one changed only in the version number it
+checks), and examples 1 to 12 print the same as with 1.4.0.
 
 **1.4.0 fixed four silent errors.** Numbers are at mpmath's default 15
 digits.
@@ -1274,6 +1411,26 @@ CI did not run Python 3.10. The full history is in
   for all as `eps` grows (true for the closed forms tested). It follows
   the branch in half decades of `Omega`, so a band left and re-entered
   within half a decade is not seen.
+- `branch_table` checks its interpolant at one point inside each
+  interval, where the error of a cubic Hermite interpolant is largest,
+  and assumes the error elsewhere in the interval is not much larger
+  (the tests allow twice `rel_tol` against closed forms and find about
+  once). It needs a differentiable line and a continuous onset over the
+  whole range. Its cost grows as `rel_tol` shrinks, roughly as
+  `rel_tol^(-1/4)` nodes, each a few high-precision integrals.
+- `fit_exact_branch` fits only the coupling scale (and, if asked, the
+  `R` scale): the shape of the line and the kernel are fixed by the
+  table, so a rejected model can be wrong in either. It does not take
+  coupling errors (`sigma_chi`). Its error bars are the asymptotic ones,
+  checked against seeded fits at 1 % noise. Build the table over a
+  wider range of `eps` than the data cover, since a best fit at its edge
+  is refused.
+- Far above the line width, `G(Omega)` integrates the line's part of
+  the kernel range on a linear scale across many decades and loses
+  digits: on the Lorentzian line at 15 digits it is 1.5e-14 (relative)
+  off for `Omega` from 100 to 1e6 line widths, 3e-13 at 1e9 and 3e-10
+  at 1e12 (at 30 digits, 1e-28 at 1e9 and 2e-25 at 1e12). Near the
+  threshold, where the onset is, it keeps the working precision.
 - `build_system`'s docstring refers to a convergence check in
   `scripts/vlasov_check.py`; that script belongs to the research
   repository and is not part of this package.
@@ -1293,7 +1450,10 @@ fold are computed, and adds `amplitude_curvature` and
 moment and `tail_integral` are integrated, and how `class_exact` steps
 through time; 1.4.0 changes how `heterogeneous` averages the kernel,
 fixes the scale of `bimodal_gaussian` and the free classes of
-`class_table`, and adds `voigt` and the branch tools); the `measured` module and the packaging are new here. Copyright as in [NOTICE](NOTICE).
+`class_table`, and adds `voigt` and the branch tools; 1.5.0 changes how
+`tail_integral` treats a line with compact support and how
+`full_exact` builds its operators, and adds `branch_table`); the
+`measured` module and the packaging are new here. Copyright as in [NOTICE](NOTICE).
 
 ## Citing, support and license
 
