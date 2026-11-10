@@ -5,6 +5,107 @@ form, an exact identity, high-precision quadrature against
 independent closed forms, or seeded simulation; the release notes on
 GitHub carry the full anchor lists.
 
+## 1.6.0 (2026-11-10)
+
+### Added
+
+- `fit_exact_branch(..., sigma_chi=None)`: the errors of the measured
+  couplings, as `fit_branch` has taken them since 1.3.0. To first order
+  an error in chi moves log R by `b(eps) sigma_chi / (chi - chi_c)`,
+  with `b(eps)` the local exponent of the branch from the table (near the
+  threshold this is `fit_branch`'s `beta sigma_chi / (chi - chi_c)`).
+  Each point's variance of log R gains that term at the fitted `k`, and
+  the fit is repeated until the weights settle. It needs `sigma_r`, and
+  it refuses `sigma_chi` above a quarter of `chi - chi_c`.
+  `ExactBranchFit` gains `sigma_chi_used` (default False). Tests:
+  `sigma_chi = 0` gives exactly the plain fit; an independent SciPy fit
+  with the closed-form branch `R = sqrt(eps/(1+eps))` and the
+  closed-form `d log R / d log chi = 1/(2 eps)` agrees in `k`, `q`, their
+  error bars and chi2 within bounds derived from the table's error
+  (observed: within about 2e-5 of an error bar); over 300 seeded data sets with
+  coupling noise of a tenth of `chi - chi_c` at the first point, the
+  scatter of `log k` and `log q` matches the median error bar (ratios
+  1.07 and 0.97, required within 12 %) and chi2 averages 10.1 for 10
+  dof. Without `sigma_chi` the error bar of `k` is about a fifth of its
+  scatter and chi2 averages 28.7.
+- `lineshapes.VoigtDistribution` and `voigt(...).frozen`: a
+  floating-point distribution of the Voigt line (`pdf`, `cdf`, `sf`,
+  `ppf` on floats or arrays), so a Voigt line can now be turned into a
+  class table for the dynamics modules (`class_table`, `build_system`).
+  `sf` is one SciPy quadrature of `voigt_profile`, mapped so that the
+  Lorentzian tail keeps its relative precision; `ppf` inverts it by
+  Brent's method from the tail that keeps the digits. Tests: `sf` and
+  `cdf` against the convolution of the Gaussian density with the Cauchy
+  distribution function (mpmath, 30 digits) to a relative 1e-13 from the
+  center out to 1e8 widths, and against the Lorentzian tail out to 1e200
+  widths (observed 2e-15), for four width ratios; `ppf` round trips to
+  1e-13 down to `q = 1e-300`; a Kolmogorov-Smirnov test on 20000
+  samples of a normal plus an independent Cauchy variable; the class
+  table reproduces the locking integral of the conservative kernel
+  against the closed form `pi erfcx(y)/(sigma sqrt(2 pi))` within 2e-5
+  (observed 5e-8 to 3e-6); mean-field dynamics on it settles on the R of
+  the exact branch (`branch_at_coupling`) within 5e-3 at 2 and 3 times
+  the threshold (observed 5e-4 and 1e-5).
+- README examples 13 and 14, and tests for both features and the fixes
+  below: 222 tests (from 195).
+
+### Fixed
+
+- `amplitude_general` evaluated its formula on a line where
+  `I_s <= 0`, where the branch leaves the threshold backwards (a
+  first-order onset) and there is no `R = A eps^(1/(s-1))` above it.
+  Before -> after, `bimodal_gaussian(4.0)` at 15 digits:
+  `power_tail(2.5)` -0.0344395904572419 + 0.0596511204638073j (a complex
+  number) -> ValueError; `power_tail(1.5)` 0.47817278336837 (positive, and
+  belonging to no branch above the threshold) -> ValueError;
+  `power_tail(2.0)` -0.102759247095407 -> ValueError (`amplitude`, the
+  conservative form, still returns `pi p(0)^2 / c` with its sign). Test:
+  `test_general_amplitude_refuses_a_backward_branch`, which also checks
+  `I_2 = 1 - 2 x D(x) < 0` in closed form and `eps < 0` on the branch.
+- `amplitude_curvature` took a `p''(0)` that is zero, but came out as
+  rounding noise, at face value. For `bimodal_gaussian(2.0)` (two peaks
+  two widths apart, whose top is flat to fourth order) the numerical
+  `p''(0)` at 15 digits is -2.5e-29. Before -> after, with the Kuramoto
+  kernel: 1.05252859094956e14 -> ValueError. A `p''(0)` below
+  `2^(20 - prec) p(0)/scale^2` in size (about 1e-10 of `p(0)/scale^2`
+  at 15 digits; for comparison, `|p''(0)|` is 8 `p(0)/scale^2` on a
+  Lorentzian line and 5.5 on a Gaussian one) now counts as zero. At 20
+  digits and more the old code already refused this line. Tests:
+  `test_amplitude_curvature_refuses_a_flat_top_from_rounding`, and
+  `test_amplitude_curvature_on_a_two_peaked_line` (separations 1, 1.9
+  and 1.999 still match the closed form to 1e-10).
+- `fold_interval` did not check its grid. With `lo = hi` it sampled one
+  point `n` times and returned None ("no fold"): for
+  `bimodal_gaussian(4.0)`, `n = 30`, `lo = hi = -2`, None -> ValueError
+  (the line folds, with hysteresis from 3.4934 to 5.8956; example 8).
+  `lo > hi` raised a RuntimeError about an unbracketed turning point, and
+  `n = 1` raised ZeroDivisionError; both now raise ValueError. `n` must
+  be a whole number of at least 3 (`n = 2` used to run and, on the same
+  line, returned None). Test: `test_fold_interval_checks_its_grid`.
+
+### Documentation
+
+- The `measured` module docstring spoke of an "eps_max refusal" in
+  `fit_branch`; there has never been one. It now says what does guard
+  the upper end of the range.
+- `predicted_beta`'s docstring and the README said that every shipped
+  line except `box` has a rounded top. `bimodal_gaussian` with
+  `sep >= 2 width` does not: `p''(0) = (a^2/width^2 - 1) p(0)/width^2`,
+  `a = sep/2`, which `bimodal_gaussian`'s docstring now states.
+- `build_system`'s docstring now says that the convergence script it
+  names belongs to the research repository (this was a README limit).
+- The README said 194 tests for 1.5.1, which had 195.
+
+### Changed
+
+- `voigt(...).frozen` is a `VoigtDistribution` instead of None, so
+  `LineShape.cdf` and `ppf` of a Voigt line no longer raise
+  NotImplementedError. The one earlier test that expected that
+  (`test_voigt_refusals`) now checks `bimodal_gaussian` instead.
+- All 195 earlier tests pass (with that change and the version check
+  now expecting 1.6.0), and README examples 1 to 12 print the same as
+  with 1.5.1.
+
 ## 1.5.1 (2026-10-18)
 
 ### Fixed
