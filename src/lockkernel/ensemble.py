@@ -101,8 +101,10 @@ def build_system(line: LineShape, N: float, chiN: float, M_core: int = 64,
 
     The boundary of the free region is placed at `free_factor` times the
     larger of the coupling and twice the line width, so that it always sits
-    well outside the locking bandwidth.  Convergence in `free_factor` is
-    checked in `scripts/vlasov_check.py`.
+    well outside the locking bandwidth.  Convergence in `free_factor` was
+    checked by the script `scripts/vlasov_check.py` of the research
+    repository this package comes from (locking-kernel-universality); that
+    script is not part of this package.
     """
     scale = float(line.scale)
     free = free_factor * max(abs(float(chiN)), 2.0 * scale)

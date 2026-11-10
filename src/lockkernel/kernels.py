@@ -197,7 +197,9 @@ def predicted_beta(s: Optional[float]) -> float:
     from being set by the tail to being set by the curvature of the line.
 
     The value 1/2 assumes the line has a rounded maximum at its centre,
-    p''(0) < 0 (every shipped line except `box`).  On a line that is flat
+    p''(0) < 0 (every shipped line except `box`, and `bimodal_gaussian`
+    with its peaks two or more widths apart, sep >= 2 width, which has a
+    dip or, at sep = 2 width, a flat top).  On a line that is flat
     at the centre, such as `box`, there is no curvature term: a tail gives
     beta = 1/(s-1) for every s > 1 (so beta < 1/2 for s > 3), and a
     compactly supported kernel gives no power law at all (the order

@@ -469,6 +469,18 @@ def amplitude_general(line: LineShape, kernel: Kernel, C=None) -> mp.mpf:
     approaches C |u|^-1.8 only with a relative correction of order
     |u|^-0.2, C came out 6.2 % low and A_s 8.3 % high on a Gaussian line.
     Also refuses a kernel without a tail exponent in 1 < s < 3.
+
+    Since 1.6.0 it also refuses a line with I_s <= 0, such as two peaks
+    far enough apart (`bimodal_gaussian(4.0)`).  There G(0) - G(Omega)
+    ~ C I_s Omega^(s-1) is negative near the threshold, so the branch
+    leaves it backwards (a first-order onset, see `fold_interval`) and
+    there is no R = A eps^(1/(s-1)) above it.  Before 1.6.0 the formula
+    was evaluated anyway: on `bimodal_gaussian(4.0)` at 15 digits it gave
+    the complex number -0.0344395904572419 + 0.0596511204638073j for
+    `power_tail(2.5)` and a positive 0.47817278336837 for
+    `power_tail(1.5)`, which looks like an amplitude but belongs to no
+    branch above the threshold.  (`amplitude`, the s = 2 form of the
+    conservative kernel, keeps returning pi p(0)^2 / c with its sign.)
     """
     if kernel.tail is None or not 1 < kernel.tail < 3:
         raise ValueError(
@@ -489,9 +501,17 @@ def amplitude_general(line: LineShape, kernel: Kernel, C=None) -> mp.mpf:
                 "the asymptotic tail amplitude C explicitly")
     elif not (mp.isfinite(mp.mpf(C)) and mp.mpf(C) > 0):
         raise ValueError(f"the tail amplitude C must be positive, got {C}")
+    I_s = tail_integral(line, s)
+    if not I_s > 0:
+        raise ValueError(
+            f"I_s = {mp.nstr(I_s, 6)} is not positive on line {line.name!r} "
+            f"(s = {kernel.tail:g}): G(0) - G(Omega) is negative near the "
+            "threshold, so the branch leaves it backwards (a first-order, "
+            "hysteretic onset; see fold_interval) and there is no "
+            "R = A eps^(1/(s-1)) above it")
     m = kernel.mass()
     p0m = line.p0() * m
-    return p0m * (p0m / (mp.mpf(C) * tail_integral(line, s))) ** (1 / (s - 1))
+    return p0m * (p0m / (mp.mpf(C) * I_s)) ** (1 / (s - 1))
 
 
 def amplitude_curvature(line: LineShape, kernel: Kernel) -> mp.mpf:
@@ -521,12 +541,25 @@ def amplitude_curvature(line: LineShape, kernel: Kernel) -> mp.mpf:
     p''(0) > 0 (a dip at the centre) the branch bends back and the onset
     is first order.  p''(0) is taken by mpmath's numerical
     differentiation.
+
+    Since 1.6.0 a p''(0) that is zero to the working precision is
+    refused as well: one with |p''(0)| below 2^(20 - prec) p(0)/scale^2
+    (about 1e-10 of p(0)/scale^2 at 15 digits; for comparison, |p''(0)|
+    is 8 p(0)/scale^2 on a Lorentzian line and 5.5 p(0)/scale^2 on a
+    Gaussian one).  Before, rounding noise
+    of either sign was taken at face value.  For two Gaussian peaks two
+    widths apart, `bimodal_gaussian(2.0)`, p''(0) is exactly zero (the
+    top is flat to fourth order), but at 15 digits the numerical
+    derivative came out -2.5e-29 and the amplitude with the Kuramoto
+    kernel came out 1.05252859094956e14 instead of a refusal.
     """
     M2 = kernel.second_moment()
     pp = mp.diff(line.pdf, mp.mpf(0), 2)
-    if not pp < 0:
+    zero = mp.mpf(2) ** (20 - mp.mp.prec) * line.p0() / mp.mpf(line.scale) ** 2
+    if not pp < -zero:
         raise ValueError(
-            f"p''(0) = {mp.nstr(pp, 5)} is not negative: the line has no "
+            f"p''(0) = {mp.nstr(pp, 5)} is not negative (or is zero to the "
+            "working precision): the line has no "
             "rounded maximum at its centre, so the onset is not of the "
             "form R = A eps^(1/2) (flat top: no curvature term; dip: the "
             "branch bends back and the onset is first order)")
@@ -578,7 +611,21 @@ def fold_interval(line: LineShape, kernel: Kernel = None, n: int = 400,
     fails now raises instead of silently returning a grid point, and a
     subcritical onset returns the exact threshold as chiN_hi instead of
     the first grid point.
+
+    Since 1.6.0 the grid is checked: `n` must be a whole number >= 3 and
+    `lo` < `hi`, both finite.  Before, lo = hi gave a grid of one point
+    repeated n times and returned None ("no fold") even for a line that
+    folds (`bimodal_gaussian(4.0)` with lo = hi = -2), lo > hi raised a
+    misleading RuntimeError, and n = 1 raised ZeroDivisionError.
     """
+    if isinstance(n, bool) or not isinstance(n, (int, np.integer)) or n < 3:
+        raise ValueError(f"fold_interval needs a whole number n >= 3 of "
+                         f"grid points, got {n!r}")
+    lo_, hi_ = mp.mpf(lo), mp.mpf(hi)
+    if not (mp.isfinite(lo_) and mp.isfinite(hi_) and lo_ < hi_):
+        raise ValueError(f"fold_interval needs lo < hi, both finite (the grid "
+                         f"runs from Omega = 10^lo to 10^hi), got lo = {lo!r}, "
+                         f"hi = {hi!r}")
     kernel = kernel or conservative()
     Om = [mp.mpf(10) ** (lo + (hi - lo) * mp.mpf(i) / (n - 1)) for i in range(n)]
     G = [G_of_Omega(line, kernel, o) for o in Om]

@@ -60,8 +60,12 @@ and a calibration of the coupling.
 
 Honest limits: the power law is the LEADING near-threshold behavior;
 data taken far above threshold bend away from it and bias beta -- fit
-what is near the onset (the eps_max refusal guards the worst of it,
-and the residual diagnostics are returned so the bend is visible).
+what is near the onset.  There is no refusal on the upper end of the
+range; with sigma_r the chi-square test flags the bend, the residual
+diagnostics are returned so it is visible, `lockkernel.parametric.eps_window`
+says how far up a model stays a power law, and `fit_exact_branch` fits
+the whole range instead.  (Before 1.6.0 this paragraph spoke of an
+"eps_max refusal", which the code never had.)
 Error bars are the standard asymptotic (J^T J)^-1 covariance of the
 weighted fit: honest when the model holds and the noise estimate is
 right, and stated as such.
@@ -677,6 +681,8 @@ class ExactBranchFit:
     without sigma_r).  eps_range is the (smallest, largest) fitted eps =
     k chi / chi_c_model - 1; residual_rms_log the root-mean-square misfit
     in log R; model and table_error come from the `BranchTable`.
+    sigma_chi_used (new in 1.6.0, default False) is True when coupling
+    errors were propagated.
     """
     model: str
     chi_scale: float
@@ -693,12 +699,14 @@ class ExactBranchFit:
     residual_rms_log: float
     table_error: float
     reference: str
+    sigma_chi_used: bool = False
 
 
 def fit_exact_branch(chi: ArrayLike, r: ArrayLike, reference: str,
                      table: "BranchTable",
                      sigma_r: Optional[ArrayLike] = None,
-                     fit_r_scale: bool = False) -> ExactBranchFit:
+                     fit_r_scale: bool = False,
+                     sigma_chi: Optional[ArrayLike] = None) -> ExactBranchFit:
     """Fit measured points with the exact branch of a model (new in 1.5.0).
 
     `fit_branch` fits the power law R = A eps^beta, which holds only near
@@ -727,6 +735,19 @@ def fit_exact_branch(chi: ArrayLike, r: ArrayLike, reference: str,
         fit needs.
     sigma_r : absolute 1-sigma errors of r (same shape), optional.
     fit_r_scale : also fit the R scale q (default False: q = 1).
+    sigma_chi : absolute 1-sigma errors of the recorded couplings (same
+        shape as chi, >= 0; new in 1.6.0).  Requires sigma_r.  As in
+        `fit_branch`, an error in chi moves log R by
+            b(eps) sigma_chi / (chi - chi_c),     chi_c = chi_c_model / k,
+        to first order, where b(eps) = d log R / d log eps is the local
+        exponent of the branch (from the table); near the threshold b(eps)
+        is beta and this is the term of `fit_branch`.  Each point's
+        variance of log R becomes (sigma_r / r)^2 plus the square of that
+        term at the fitted k, and the fit is repeated with these weights
+        until they settle (the effective-variance method).  Refused when
+        sigma_chi exceeds 0.25 (chi - chi_c) at any point, where first
+        order is not enough, as in `fit_branch`.  A coupling error common
+        to all points (a scale) is not this: it is what k absorbs.
 
     Error bars are the asymptotic ones, (J^T J)^-1 with the exact
     Jacobian (d log R / d log k = (1 + eps)/eps times the local exponent
@@ -736,7 +757,8 @@ def fit_exact_branch(chi: ArrayLike, r: ArrayLike, reference: str,
     of the table's range (build the table wider); a fit that does not
     converge; and a table whose interpolation error (`max_error`) is more
     than 1 % of the smallest relative error of R (with sigma_r) or of
-    the rms misfit (without), where it could bias the fit.
+    the rms misfit (without), where it could bias the fit; and the
+    sigma_chi cases above.
     """
     _check_reference(reference)
     x = np.asarray(chi, dtype=float)
@@ -766,6 +788,16 @@ def fit_exact_branch(chi: ArrayLike, r: ArrayLike, reference: str,
                 f"({np.min(w):.2g}); rebuild it with a smaller rel_tol")
     else:
         w = np.ones_like(y)
+    if sigma_chi is not None:
+        if sigma_r is None:
+            raise ValueError(
+                "sigma_chi needs sigma_r: the coupling errors are added "
+                "to the stated errors of R, which must then be given")
+        sx = np.asarray(sigma_chi, dtype=float)
+        if sx.shape != x.shape or np.any(~np.isfinite(sx)) \
+                or np.any(sx < 0.0):
+            raise ValueError("sigma_chi must be finite and >= 0 on the "
+                             "same grid as chi")
     ly = np.log(y)
     chi_c = float(table.chi_c)
     # log k such that every point lies inside the table's eps range
@@ -812,10 +844,32 @@ def fit_exact_branch(chi: ArrayLike, r: ArrayLike, reference: str,
     p0 = [grid[i0]] + ([float(profile_lq(lr[i0]))] if fit_r_scale else [])
     bounds = ([lk_lo] + [-np.inf] * (nfree - 1),
               [lk_hi] + [np.inf] * (nfree - 1))
-    out = least_squares(resid, p0, jac=jac, bounds=bounds, x_scale="jac")
-    if not out.success:
-        raise ValueError(f"the exact-branch fit did not converge: "
-                         f"{out.message}")
+    def solve(p_start):
+        # resid and jac read the current weights w
+        o = least_squares(resid, p_start, jac=jac, bounds=bounds,
+                          x_scale="jac")
+        if not o.success:
+            raise ValueError(f"the exact-branch fit did not converge: "
+                             f"{o.message}")
+        return o
+
+    out = solve(p0)
+    if sigma_chi is not None and np.any(sx > 0.0):
+        # effective variance (new in 1.6.0): d log R / d log chi is the
+        # Jacobian column, b(eps) (1 + eps)/eps; re-weight at the fitted k
+        # until the weights settle
+        w_r = w
+        for _ in range(100):
+            eps_f, _, slope_f = model(out.x[0])
+            w_new = np.sqrt(w_r ** 2
+                            + (slope_f * (1.0 + eps_f) / eps_f * sx / x) ** 2)
+            if np.max(np.abs(w_new / w - 1.0)) < 1e-10:
+                break
+            w = w_new
+            out = solve(out.x)
+        else:
+            raise ValueError("the weights of the coupling errors did not "
+                             "settle in 100 refits")
     lk = float(out.x[0])
     if min(lk - lk_lo, lk_hi - lk) <= 1e-6 * span:
         eps_edge = np.exp(lk) * x / chi_c - 1.0
@@ -824,6 +878,17 @@ def fit_exact_branch(chi: ArrayLike, r: ArrayLike, reference: str,
             f"table's range (eps from {eps_edge[0]:.4g} to {eps_edge[-1]:.4g},"
             f" table {table.eps_min:.4g} .. {table.eps_max:.4g}): build the "
             "table over a wider range")
+    if sigma_chi is not None:
+        ratio = sx / (x - chi_c / np.exp(lk))
+        if np.max(ratio) > _SIGMA_CHI_MAX_RATIO:
+            i = int(np.argmax(ratio))
+            raise ValueError(
+                f"sigma_chi is {ratio[i]:.2f} of chi - chi_c at chi = "
+                f"{x[i]:.6g} (limit {_SIGMA_CHI_MAX_RATIO}): the coupling "
+                "error is not small next to the distance from the "
+                "threshold, and first-order propagation does not hold. "
+                "Drop the points closest to the threshold or measure the "
+                "coupling more precisely")
     res = out.fun
     J = jac(out.x)
     try:
@@ -854,4 +919,5 @@ def fit_exact_branch(chi: ArrayLike, r: ArrayLike, reference: str,
         p_value=(float(stats.chi2.sf(chi2, dof)) if sigma_r is not None
                  else None),
         eps_range=(float(eps[0]), float(eps[-1])), residual_rms_log=rms,
-        table_error=float(table.max_error), reference=reference)
+        table_error=float(table.max_error), reference=reference,
+        sigma_chi_used=sigma_chi is not None)
