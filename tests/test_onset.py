@@ -527,3 +527,70 @@ def test_input_checks_of_lines_and_kernels():
     assert K.predicted_beta(None) == 0.5
     assert K.predicted_beta(float("inf")) == 0.5
     assert K.predicted_beta(2.5) == 1 / 1.5
+
+
+# ---------------------------------------------------------------------------
+# New in 1.6.0: amplitudes on lines whose onset is not a rising power law.
+# References: on two unit Gaussians at +-a, I_2 = pi c = 1 - 2 x D(x),
+# x = a/sqrt(2) (the Dawson form above), and p''(0) = (a^2 - 1) p(0), so
+# p''(0) = 0 exactly at sep = 2 a = 2.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("s", [1.5, 2.0, 2.5])
+def test_general_amplitude_refuses_a_backward_branch(s):
+    """Two peaks 4 widths apart: I_s < 0, so the branch leaves the
+    threshold backwards (eps < 0 near it) and there is no R = A eps^beta
+    above the threshold.  Before 1.6.0 amplitude_general returned a number
+    anyway: -0.0344395904572419 + 0.0596511204638073j (complex) for
+    s = 2.5, 0.47817278336837 for s = 1.5, -0.102759247095407 for s = 2."""
+    line = L.bimodal_gaussian(4.0)
+    x = mp.mpf(2) / mp.sqrt(2)
+    assert 1 - 2 * x * _dawson(x) < 0                  # I_2 < 0, closed form
+    assert P.tail_integral(line, s) < 0
+    # the branch itself is at eps < 0 near the threshold (bends back)
+    assert P.branch_point(line, K.power_tail(s), mp.mpf("1e-4"))[2] < 0
+    with pytest.raises(ValueError, match="backwards"):
+        P.amplitude_general(line, K.power_tail(s), C=1)
+    with pytest.raises(ValueError, match="backwards"):
+        P.amplitude_general(line, K.power_tail(s))
+
+
+def test_amplitude_curvature_refuses_a_flat_top_from_rounding():
+    """bimodal_gaussian(2.0) has p''(0) = 0 exactly (a flat top, flat to
+    fourth order).  At 15 digits the numerical p''(0) is -2.5e-29, and
+    before 1.6.0 amplitude_curvature took it at face value and returned
+    1.05252859094956e14 with the Kuramoto kernel."""
+    line = L.bimodal_gaussian(2.0)
+    with pytest.raises(ValueError, match="rounded maximum"):
+        P.amplitude_curvature(line, K.kuramoto())
+    with pytest.raises(ValueError, match="rounded maximum"):
+        P.amplitude_curvature(line, K.gaussian_kernel())
+
+
+@pytest.mark.parametrize("sep", [1.0, 1.9, 1.999])
+def test_amplitude_curvature_on_a_two_peaked_line(sep):
+    """A rounded top close to the flat one is still accepted, and matches
+    A = G0^(3/2) sqrt(2 / (-p''(0) M2)) with the closed forms
+    p''(0) = (a^2 - 1) p(0), M2 = pi/8 and G0 = p(0) pi/2 (Kuramoto)."""
+    a = mp.mpf(sep) / 2
+    p0 = mp.exp(-a ** 2 / 2) / mp.sqrt(2 * mp.pi)
+    G0 = p0 * mp.pi / 2
+    want = G0 * mp.sqrt(2 * G0 / (-(a ** 2 - 1) * p0 * mp.pi / 8))
+    got = P.amplitude_curvature(L.bimodal_gaussian(sep), K.kuramoto())
+    assert abs(got / want - 1) < mp.mpf("1e-10")
+
+
+def test_fold_interval_checks_its_grid():
+    """Before 1.6.0 lo = hi made a grid of one repeated point and returned
+    None ("no fold") for a line that folds; lo > hi raised a misleading
+    RuntimeError about an unbracketed turning point, and n = 1 raised
+    ZeroDivisionError.  The fold itself is example 8's (two peaks 4 widths
+    apart; checked against the Voigt closed form above)."""
+    line = L.bimodal_gaussian(4.0)
+    for kw in (dict(lo=-2, hi=-2), dict(lo=1, hi=-2),
+               dict(lo=-2, hi=float("inf"))):
+        with pytest.raises(ValueError, match="lo < hi"):
+            P.fold_interval(line, n=30, **kw)
+    for n in (1, 2, 30.0, True):
+        with pytest.raises(ValueError, match="n >= 3"):
+            P.fold_interval(line, n=n, lo=-2, hi=1)

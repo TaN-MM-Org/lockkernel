@@ -283,8 +283,91 @@ def test_voigt_refusals():
         L.voigt(0.0, 1.0)
     with pytest.raises(ValueError, match="fwhm_lorentz"):
         L.voigt(1.0, -1.0)
+    # since 1.6.0 voigt has a float distribution; bimodal_gaussian still not
     with pytest.raises(NotImplementedError):
-        L.voigt(1.0, 1.0).cdf(0.0)
+        L.bimodal_gaussian(4.0).cdf(0.0)
+    with pytest.raises(ValueError, match="sigma"):
+        L.VoigtDistribution(0.0, 1.0)
+
+
+# ---------------------------------------------------------------------------
+# New in 1.6.0: the float distribution of the Voigt line.  Reference: the
+# Voigt line is the distribution of X + Y with X normal (sigma) and Y Cauchy
+# (half width gamma) independent, so sf(x) = int phi(y) S_C(x - y) dy with
+# the Cauchy tail S_C(t) = atan2(gamma, t)/pi.  This convolution is taken
+# here by mpmath at 30 digits, independently of the Faddeeva function and of
+# SciPy's quadrature; far out (1e50 widths and beyond) the reference is the
+# Lorentzian tail gamma/(pi x), exact to a relative (width/x)^2.
+# ---------------------------------------------------------------------------
+
+def _voigt_sf_ref(x, sig, gam):
+    with mp.workdps(30):
+        x, sig, gam = mp.mpf(x), mp.mpf(sig), mp.mpf(gam)
+        if x > 1e13 * (sig + gam):
+            return gam / (mp.pi * x)
+        f = lambda y: (mp.exp(-y ** 2 / (2 * sig ** 2))
+                       / (sig * mp.sqrt(2 * mp.pi)) * mp.atan2(gam, x - y)
+                       / mp.pi)
+        pts = sorted({-mp.inf, -10 * sig, mp.mpf(0), 10 * sig, x - 10 * gam,
+                      x, x + 10 * gam, mp.inf})
+        return mp.quad(f, pts)
+
+
+@pytest.mark.parametrize("fg,fl", [(1.0, 0.3), (1.0, 1e-4), (0.01, 1.0),
+                                   (1000.0, 3.0)])
+def test_voigt_distribution_against_the_convolution(fg, fl):
+    """sf and cdf from the center out to 1e200 widths, on both sides, to a
+    relative 1e-13 (observed 2e-15)."""
+    d = L.voigt(fg, fl).frozen
+    assert abs(d.sigma - fg / (2 * np.sqrt(2 * np.log(2)))) < 1e-15 * fg
+    assert d.gamma == fl / 2
+    w = fg + fl
+    for x in (0.0, 1e-3, 0.1, 0.5, 0.99, 1.0, 1.01, 2.0, 5.0, 10.0, 100.0,
+              1e4, 1e6, 1e8, 1e50, 1e200):
+        want = float(_voigt_sf_ref(x * w, d.sigma, d.gamma))
+        for got in (d.sf(x * w), d.cdf(-x * w)):
+            assert abs(got / want - 1) < 1e-13
+        assert abs(d.cdf(x * w) - (1 - want)) < 1e-15
+    assert d.sf(np.inf) == 0.0 and d.cdf(np.inf) == 1.0
+    assert np.isnan(d.cdf(np.nan))
+    # the density is SciPy's voigt_profile, already held to 120 digits above
+    assert abs(d.pdf(0.3 * w) / float(L.voigt(fg, fl).pdf(0.3 * w)) - 1) < 1e-12
+
+
+@pytest.mark.parametrize("fg,fl", [(1.0, 0.3), (0.01, 1.0), (1000.0, 3.0)])
+def test_voigt_ppf_inverts_the_distribution(fg, fl):
+    """The tail probability at ppf(q) is q (or 1 - q) to a relative 1e-13,
+    from q = 1e-300 to the center (observed about 1e-15); ppf is odd about
+    q = 1/2 and takes arrays."""
+    d = L.voigt(fg, fl).frozen
+    for q in (1e-300, 1e-100, 1e-20, 1e-8, 0.01, 0.2, 0.4999):
+        x = d.ppf(q)
+        assert x < 0 and abs(d.cdf(x) / q - 1) < 1e-13
+        assert d.ppf(1 - q) == pytest.approx(-d.ppf(1 - (1 - q)), rel=1e-12)
+    for q in (0.75, 0.999):
+        assert abs(d.sf(d.ppf(q)) / (1 - q) - 1) < 1e-13
+    assert d.ppf(0.5) == 0.0
+    assert d.ppf(0.0) == -np.inf and d.ppf(1.0) == np.inf
+    assert np.isnan(d.ppf(1.5))
+    a = d.ppf(np.array([0.25, 0.75]))
+    assert a.shape == (2,) and a[0] == -a[1]
+
+
+def test_voigt_distribution_against_samples():
+    """20000 seeded samples of a normal plus an independent Cauchy variable:
+    a Kolmogorov-Smirnov test accepts the Voigt distribution (p = 0.70 and
+    0.86 with these seeds) and, for the first line, rejects the Gaussian
+    and the Lorentzian parts alone (p below 1e-50)."""
+    from scipy import stats
+    for fg, fl, seed, power in ((1.0, 0.3, 11, True), (0.2, 2.0, 12, False)):
+        d = L.voigt(fg, fl).frozen
+        rng = np.random.default_rng(seed)
+        x = (rng.normal(0.0, d.sigma, 20000)
+             + d.gamma * rng.standard_cauchy(20000))
+        assert stats.kstest(x, d.cdf).pvalue > 0.01
+        if power:
+            assert stats.kstest(x, stats.norm(scale=d.sigma).cdf).pvalue < 1e-50
+            assert stats.kstest(x, stats.cauchy(scale=d.gamma).cdf).pvalue < 1e-50
 
 
 # ---------------------------------------------------------------------------

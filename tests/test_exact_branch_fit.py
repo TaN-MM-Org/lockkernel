@@ -243,3 +243,137 @@ def test_fit_exact_branch_refusals(kur_table):
     with pytest.raises(ValueError, match="edge of the table"):
         fit_exact_branch((1 + eps) / 2.5e-3, np.sqrt(eps / (1 + eps)), REF,
                          kur_table, sigma_r=0.01 * np.sqrt(eps / (1 + eps)))
+
+
+# ---------------------------------------------------------------------------
+# New in 1.6.0: coupling errors in fit_exact_branch.  Reference: on the
+# Lorentzian-Kuramoto branch log R = (log eps - log(1+eps))/2 with
+# eps = k chi - 1, so d log R / d log chi = 1/(2 eps) in closed form, and an
+# independent scipy fit iterates the effective variance
+# (sigma_r/r)^2 + (sigma_chi / (2 eps chi))^2 with it.
+# ---------------------------------------------------------------------------
+
+K0 = 2.5e-3
+_EPS = np.geomspace(1e-3, 0.5, 12)
+_CHI = (1 + _EPS) / K0
+# a tenth of chi - chi_c at the first point, as in fit_branch's tests
+_SX = np.full(12, 0.1 * (_CHI[0] - 1 / K0))
+
+
+def _kur_data_chi_noise(seed, q=1.0):
+    """R at the TRUE couplings, which scatter by _SX about the recorded
+    _CHI, with 1 % log-normal noise on R."""
+    rng = np.random.default_rng(seed)
+    e = K0 * (_CHI + rng.normal(0.0, 1.0, 12) * _SX) - 1
+    return q * np.sqrt(e / (1 + e)) * np.exp(rng.normal(0.0, 0.01, 12))
+
+
+def test_coupling_errors_zero_is_the_plain_exact_fit(kur_table):
+    """sigma_chi = 0 adds nothing: every number is the plain fit's."""
+    r = _kur_data_chi_noise(2, q=0.9)
+    for fit_q in (False, True):
+        a = fit_exact_branch(_CHI, r, REF, kur_table, sigma_r=0.01 * r,
+                             fit_r_scale=fit_q)
+        b = fit_exact_branch(_CHI, r, REF, kur_table, sigma_r=0.01 * r,
+                             fit_r_scale=fit_q, sigma_chi=np.zeros(12))
+        assert b.sigma_chi_used and not a.sigma_chi_used
+        for name in ("chi_scale", "sigma_chi_scale", "r_scale",
+                     "sigma_r_scale", "chi_c", "sigma_chi_c", "chi2",
+                     "p_value", "residual_rms_log", "eps_range"):
+            assert getattr(a, name) == getattr(b, name)
+
+
+@pytest.mark.parametrize("fit_q,q", [(False, 1.0), (True, 0.8)])
+def test_coupling_errors_match_a_closed_form_fit(kur_table, fit_q, q):
+    """The same data fitted by scipy with the closed-form branch and the
+    closed-form effective variance.  The table differs from the closed form
+    by at most d = 2e-7 in log R and by a relative db in the local exponent
+    (measured here on 20001 points), which moves each weighted residual by
+    at most d/0.01 and each weight by a relative db.  So k and q may differ
+    by sqrt(n) (d/0.01 + db) of their error bars, the error bars by 1e-4
+    (relative), and chi2 by 2 sqrt(n chi2) d/0.01 + n (d/0.01)^2
+    + 2 db chi2.  Observed: about 2e-5 error bars and 2.5e-5."""
+    e = np.geomspace(kur_table.eps_min, kur_table.eps_max, 20001)
+    db = float(np.max(np.abs(kur_table.log_R_and_slope(e)[1]
+                             / (0.5 / (1 + e)) - 1)))
+    assert db < 1e-5
+    r = _kur_data_chi_noise(7, q=q)
+    f = fit_exact_branch(_CHI, r, REF, kur_table, sigma_r=0.01 * r,
+                         fit_r_scale=fit_q, sigma_chi=_SX)
+    w = np.full(12, 0.01)
+    p = [np.log(K0)] + ([0.0] if fit_q else [])
+    for _ in range(200):
+        def res(p, w=w):
+            ee = np.exp(p[0]) * _CHI - 1
+            return ((p[1] if fit_q else 0.0) + 0.5 * np.log(ee / (1 + ee))
+                    - np.log(r)) / w
+        o = least_squares(res, p, x_scale="jac", xtol=1e-15, ftol=1e-15,
+                          gtol=1e-15)
+        p = o.x
+        ee = np.exp(p[0]) * _CHI - 1
+        w_new = np.sqrt(0.01 ** 2 + (_SX / (2 * ee * _CHI)) ** 2)
+        if np.max(np.abs(w_new / w - 1)) < 1e-12:
+            break
+        w = w_new
+    else:
+        raise AssertionError("the reference weights did not settle")
+    sig = np.sqrt(np.diag(np.linalg.inv(o.jac.T @ o.jac)))
+    d = 2e-7 / 0.01
+    tol = np.sqrt(12) * (d + db)
+    assert abs(np.log(f.chi_scale) - o.x[0]) < tol * sig[0]
+    assert abs(f.sigma_chi_scale / f.chi_scale / sig[0] - 1) < 1e-4
+    chi2 = 2 * o.cost
+    assert abs(f.chi2 - chi2) < (2 * np.sqrt(12 * chi2) * d + 12 * d ** 2
+                                 + 2 * db * chi2)
+    if fit_q:
+        assert abs(np.log(f.r_scale) - o.x[1]) < tol * sig[1]
+        assert abs(f.sigma_r_scale / f.r_scale / sig[1] - 1) < 1e-4
+    # the coupling errors matter here: the weights at the first point grow
+    # several fold over sigma_r alone
+    assert w[0] > 3 * 0.01
+
+
+def test_coupling_errors_against_seeded_fits(kur_table):
+    """300 seeded data sets with coupling noise of a tenth of chi - chi_c at
+    the first point, k and q fitted.  With sigma_chi the scatter of log k
+    and log q matches the median error bar within 12 % (the sampling error
+    of a 300-fit scatter is about 4 %; observed 1.07 and 0.97), the means
+    lie within 4 standard errors of the truth, and chi2 averages to dof
+    within 4 standard errors.  Without it the error bar of log k is less
+    than half the scatter (observed 0.30), chi2 averages far above dof and
+    the median p-value is small."""
+    g = []
+    for seed in range(300):
+        r = _kur_data_chi_noise(5000 + seed, q=0.8)
+        f = fit_exact_branch(_CHI, r, REF, kur_table, sigma_r=0.01 * r,
+                             fit_r_scale=True, sigma_chi=_SX)
+        f0 = fit_exact_branch(_CHI, r, REF, kur_table, sigma_r=0.01 * r,
+                              fit_r_scale=True)
+        g.append((np.log(f.chi_scale), np.log(f.r_scale),
+                  f.sigma_chi_scale / f.chi_scale, f.sigma_r_scale / f.r_scale,
+                  f.chi2, f.p_value, f0.sigma_chi_scale / f0.chi_scale,
+                  f0.chi2, f0.p_value))
+    g = np.array(g)
+    for col, truth in ((0, np.log(K0)), (1, np.log(0.8))):
+        scatter = g[:, col].std(ddof=1)
+        assert abs(scatter / np.median(g[:, col + 2]) - 1) < 0.12
+        assert abs(g[:, col].mean() - truth) < 4 * scatter / np.sqrt(300)
+    assert abs(g[:, 4].mean() - 10) < 4 * np.sqrt(2 * 10 / 300)
+    assert np.median(g[:, 6]) < 0.5 * g[:, 0].std(ddof=1)
+    assert g[:, 7].mean() > 20 and np.median(g[:, 8]) < 0.05 < np.median(g[:, 5])
+
+
+def test_coupling_error_refusals_of_the_exact_fit(kur_table):
+    r = _kur_data_chi_noise(3)
+    with pytest.raises(ValueError, match="needs sigma_r"):
+        fit_exact_branch(_CHI, r, REF, kur_table, sigma_chi=_SX)
+    with pytest.raises(ValueError, match=">= 0"):
+        fit_exact_branch(_CHI, r, REF, kur_table, sigma_r=0.01 * r,
+                         sigma_chi=-_SX)
+    with pytest.raises(ValueError, match=">= 0"):
+        fit_exact_branch(_CHI, r, REF, kur_table, sigma_r=0.01 * r,
+                         sigma_chi=_SX[:5])
+    # half of chi - chi_c at the first point: first order fails
+    with pytest.raises(ValueError, match="not small"):
+        fit_exact_branch(_CHI, r, REF, kur_table, sigma_r=0.01 * r,
+                         sigma_chi=5 * _SX)
