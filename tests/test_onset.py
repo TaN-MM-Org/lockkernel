@@ -1,6 +1,6 @@
 """New in 1.2.0: the reduced coupling without cancellation, the order of the
 onset on a two-peaked line, the fold of the branch, the amplitude of the
-beta = 1/2 class, and lines that are flat at the centre.
+beta = 1/2 class, and lines that are flat at the center.
 
 Every reference here is computed independently of the package's quadrature:
 closed forms of the branch (Lorentzian line, box line through a Gauss
@@ -8,6 +8,8 @@ hypergeometric function, Gaussian mixtures through the Faddeeva function
 w(z) = exp(-z^2) erfc(-iz), whose real part is the Voigt profile), Dawson's
 function for the coefficient c, and closed forms of kernel moments.
 """
+import dataclasses
+
 import mpmath as mp
 import pytest
 
@@ -24,7 +26,7 @@ def _faddeeva(z):
 
 
 def _mixture_pdf(comps):
-    """Symmetric Gaussian mixture: (weight, centre, sigma); a centre a > 0
+    """Symmetric Gaussian mixture: (weight, center, sigma); a center a > 0
     stands for two half-weight peaks at +a and -a."""
     terms = []
     for w, a, s in comps:
@@ -41,7 +43,7 @@ def _G_voigt(O, comps):
     """G(Omega) for the conservative kernel on a Gaussian mixture.
 
     G = int p(delta) Omega/(delta^2 + Omega^2) d delta is pi times the
-    Lorentzian smoothing of the line at the centre, which for each Gaussian
+    Lorentzian smoothing of the line at the center, which for each Gaussian
     is a Voigt profile, Re w((a + i Omega)/(sigma sqrt 2))/(sigma sqrt(2 pi)).
     """
     tot = mp.mpf(0)
@@ -130,7 +132,7 @@ def test_box_line_branch_closed_form(s):
 
 
 # ---------------------------------------------------------------------------
-# Lines that are flat at the centre, and branches below threshold
+# Lines that are flat at the center, and branches below threshold
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("s", [4.0, 6.0])
@@ -396,8 +398,15 @@ def test_general_amplitude_tail_amplitude_check():
         het = K.heterogeneous(K.conservative(), 3.8)
         v = mp.mpf(10) ** 6
         assert abs(het.W(v) * v ** het.tail / C_closed - 1) > 0.05
+        # since 1.7.0 the kernel carries its exact C, so the estimate is
+        # used (and refused) only for a kernel that does not know it
+        no_C = dataclasses.replace(het, tail_amplitude=None)
         with pytest.raises(ValueError, match="not converged"):
-            P.amplitude_general(L.gaussian(1.0), het)
+            P.amplitude_general(L.gaussian(1.0), no_C)
+        assert abs(het.tail_amplitude() / C_closed - 1) < mp.mpf("1e-13")
+        A = P.amplitude_general(L.gaussian(1.0), het)
+        A_C = P.amplitude_general(L.gaussian(1.0), no_C, C=C_closed)
+        assert abs(A / A_C - 1) < mp.mpf("1e-13")        # measured 0
 
         het_k = K.heterogeneous(K.kuramoto(), 3.8)
         s = mp.mpf(het_k.tail)
@@ -594,3 +603,220 @@ def test_fold_interval_checks_its_grid():
     for n in (1, 2, 30.0, True):
         with pytest.raises(ValueError, match="n >= 3"):
             P.fold_interval(line, n=n, lo=-2, hi=1)
+
+
+# ---------------------------------------------------------------------------
+# New in 1.7.0
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("dps", [40, 60])
+def test_amplitude_beyond_20_digits(dps):
+    """1.6.0 left out the first 1e-20 line widths of the integral for c, so
+    c and the amplitude were good to about 20 digits however high the
+    precision: at 40 digits amplitude(lorentzian()) was 1 + 1.3e-20 and
+    amplitude(gaussian()) pi/2 (1 + 9.4e-21).  The piece is now added in
+    closed form, which leaves a relative error of order 1e-60.  Closed
+    forms: A = 1 on a Lorentzian line (any width) and pi/2 on a Gaussian
+    one; c from tail_integral(line, 2) / pi, a different integral."""
+    with mp.workdps(dps):
+        tol = mp.mpf(10) ** (-dps + 5) if dps <= 50 else mp.mpf("1e-58")
+        for line, want in ((L.lorentzian(1.0), 1), (L.lorentzian(1000.0), 1),
+                           (L.gaussian(1.0), mp.pi / 2)):
+            # measured at 40 digits: 0, 1.2e-41 and 2.3e-41; at 60:
+            # 1.6e-60, 1.7e-60 and 3.9e-61
+            assert abs(P.amplitude(line) / want - 1) < tol
+        line = L.gaussian(1.0)
+        c_tail = P.tail_integral(line, 2) / mp.pi
+        # measured 0 at 40 digits and 4.7e-61 at 60
+        assert abs(P.c_coefficient(line) / c_tail - 1) < mp.mpf(10) ** (-dps + 5)
+
+
+def _G_lorentz_conservative(Omega):
+    """Lorentzian line of half width 1/2, conservative kernel: the
+    Lorentzian smoothing gives G = 1/(1/2 + Omega)."""
+    return 1 / (mp.mpf(1) / 2 + Omega)
+
+
+def _G_lorentz_kuramoto(Omega):
+    """Kuramoto kernel on the same line: from R = sqrt(1 - chi_c/chiN),
+    chi_c = 2 g, R = Omega G and chiN = 1/G, G = 1/(g + sqrt(g^2 + Omega^2))
+    (written without cancellation)."""
+    g = mp.mpf(1) / 2
+    return 1 / (g + mp.sqrt(g ** 2 + Omega ** 2))
+
+
+def _G_gauss_kuramoto(Omega):
+    """Kuramoto kernel on a Gaussian line of FWHM 1 (sigma s):
+    G = p(0) (pi/2) e^-z (I0(z) + I1(z)), z = Omega^2/(4 s^2), as in
+    test_exact_branch_fit.py; mpmath's Bessel functions at 30 extra
+    digits."""
+    with mp.extradps(30):
+        s = 1 / (2 * mp.sqrt(2 * mp.log(2)))
+        z = mp.mpf(Omega) ** 2 / (4 * s ** 2)
+        v = (mp.pi / 2) / (s * mp.sqrt(2 * mp.pi)) * mp.exp(-z) \
+            * (mp.besseli(0, z) + mp.besseli(1, z))
+    return +v
+
+
+@pytest.mark.parametrize("dps,tol", [(15, "3e-14"), (30, "1e-29")])
+def test_G_far_above_the_line_width(dps, tol):
+    """For Omega far above the line width, 1.6.0 took [10 scale/Omega, 1] on
+    a linear scale and integrated a G that falls like 1/Omega against an
+    absolute error estimate.  At 15 digits, Lorentzian line of FWHM 1:
+    conservative kernel 3.2e-10 (relative) off at Omega = 1e12 and 2.3 %
+    at 1e15; Kuramoto kernel 1.2e-11 at 1e9 and 1.3e-8 at 1e12.  Now the
+    working precision holds out to Omega = 1e30 (measured at most 5.4e-15
+    at 15 digits and 8.9e-31 at 30; on the branch 4.4e-16 and 2e-31)."""
+    import numpy as np
+    from scipy.special import erfcx
+    with mp.workdps(dps):
+        lor, gau = L.lorentzian(1.0), L.gaussian(1.0)
+        for e in (-3, 0, 2, 6, 9, 12, 15, 20, 30):
+            Om = mp.mpf(10) ** e
+            for line, kern, ref in ((lor, K.conservative(), _G_lorentz_conservative),
+                                    (lor, K.kuramoto(), _G_lorentz_kuramoto),
+                                    (gau, K.kuramoto(), _G_gauss_kuramoto)):
+                got = P.G_of_Omega(line, kern, Om)
+                assert abs(got / ref(Om) - 1) < mp.mpf(tol), (e, kern.name)
+            if dps == 15:
+                # Gaussian line, conservative kernel: G = pi erfcx(y) /
+                # (s sqrt(2 pi)), y = Omega / (s sqrt 2), against SciPy's
+                # erfcx in floating point (measured 1.1e-15)
+                s = 1 / (2 * np.sqrt(2 * np.log(2)))
+                want = np.pi * erfcx(float(Om) / (s * np.sqrt(2))) \
+                    / (s * np.sqrt(2 * np.pi))
+                got = float(P.G_of_Omega(gau, K.conservative(), Om))
+                assert abs(got / want - 1) < 3e-15
+        # far up the branch eps = G(0)/G - 1 and R = Omega G as well
+        chiN, R, eps = P.branch_point(lor, K.conservative(), mp.mpf(10) ** 12)
+        Om = mp.mpf(10) ** 12
+        assert abs(R / (Om / (mp.mpf(1) / 2 + Om)) - 1) < mp.mpf(tol)
+        assert abs(eps / (2 * Om) - 1) < mp.mpf(tol)
+
+
+@pytest.mark.parametrize("kern,n,want", [
+    ("kuramoto", 4, 0.25), ("gaussian", 4, 0.25), ("power6", 4, 0.25),
+    ("power4", 4, 1 / 3), ("power2.5", 4, 2 / 3),
+    ("kuramoto", 1, 1.0), ("power1.5", 1, 2.0), ("power3", 1, 1.0)])
+def test_beta_on_other_line_tops(kern, n, want):
+    """predicted_beta(s, center_order=n): beta = 1/(s-1) for s < n+1 and
+    1/n beyond, for a line with p(0) - p(d) ~ |d|^n at its center.  Checked
+    against the exact branch (extract_beta, Omega = 1e-2 .. 1e-6, 20
+    digits) on two lines with closed-form tops:
+    * n = 4: two Gaussian peaks exactly two widths apart,
+      p(d) = p(0) e^(-d^2/2) cosh(d) = p(0) (1 - d^4/12 + ...);
+    * n = 1: the Laplace line p(d) = e^-|d| / 2, which has a cusp.
+    The next correction is of relative order Omega^|s - 1 - n| (Omega^2 for
+    no tail), so the tolerances differ; measured relative errors of the last
+    slope are in the table below."""
+    kernels = {"kuramoto": K.kuramoto(), "gaussian": K.gaussian_kernel(),
+               "power6": K.power_tail(6.0), "power4": K.power_tail(4.0),
+               "power2.5": K.power_tail(2.5), "power1.5": K.power_tail(1.5),
+               "power3": K.power_tail(3.0)}
+    kernel = kernels[kern]
+    assert K.predicted_beta(kernel.tail, center_order=n) == pytest.approx(want, rel=1e-15)
+    if n == 4:
+        line = L.bimodal_gaussian(2.0)
+    else:
+        line = LineShape("laplace", lambda d: mp.exp(-abs(mp.mpf(d))) / 2, 1.0)
+    with mp.workdps(20):
+        b = P.extract_beta(line, kernel, [-2, -3, -4, -5, -6])[-1]
+    tol = {  # (kernel, n): tolerance   measured
+        ("kuramoto", 4): 1e-10,          # 1.8e-12
+        ("gaussian", 4): 1e-10,          # 7.2e-12
+        ("power6", 4): 5e-6,             # 8.4e-7, correction Omega^1
+        ("power4", 4): 5e-6,             # 7.8e-7, correction Omega^1
+        ("power2.5", 4): 5e-8,           # 5.2e-9
+        ("kuramoto", 1): 2e-5,           # 2.2e-6, correction Omega^1
+        ("power1.5", 1): 5e-3,           # 2.8e-3, correction Omega^0.5
+        ("power3", 1): 1e-4,             # 1.2e-5, correction Omega^1
+    }[(kern, n)]
+    assert abs(b / want - 1) < tol
+
+
+def test_beta_on_a_flat_top():
+    """center_order = inf (a line flat around its center, as box): every
+    tail gives 1/(s-1), also beyond s = 3 (checked on the box line against
+    the exact branch in test_flat_top_line_gives_one_over_s_minus_one_beyond_three),
+    and a kernel without a tail gives no power law, which is refused.
+    center_order = 2 is the classic rule, unchanged."""
+    import math
+    for s in (1.5, 2.5, 4.0, 6.0, 30.0):
+        assert K.predicted_beta(s, center_order=math.inf) == 1 / (s - 1)
+    for s in (1.5, 2.5, 4.0, None, math.inf):
+        assert K.predicted_beta(s, 2) == K.predicted_beta(s)
+    assert K.predicted_beta(None) == 0.5 and K.predicted_beta(2.0) == 1.0
+    with pytest.raises(ValueError, match="jumps"):
+        K.predicted_beta(None, center_order=math.inf)
+    for bad in (0, -2, float("nan"), "x"):
+        with pytest.raises(ValueError, match="center_order"):
+            K.predicted_beta(2.5, center_order=bad)
+
+
+def test_general_amplitude_uses_the_exact_tail_amplitude():
+    """1.6.0 read C off the kernel at |u| = 1e6, which for power_tail(s) is
+    1/(1 + 1e-6s), and the power 1/(s-1) multiplies the error: on a
+    Lorentzian line at 15 digits A was 2.5e-6 (s = 1.1) and 2.0e-9
+    (s = 1.5) off the closed form.  Now C = 1 exactly (measured 7.6e-15,
+    4.4e-16 and 2.2e-16 for s = 1.1, 1.5 and 2.5)."""
+    with mp.workdps(15):
+        for s in ("1.1", "1.5", "2.5"):
+            s = mp.mpf(s)
+            p0m = 2 / mp.pi * 2 * (mp.pi / s) / mp.sin(mp.pi / s)
+            want = p0m * (p0m / _I_lorentzian(1.0, s)) ** (1 / (s - 1))
+            got = P.amplitude_general(L.lorentzian(1.0), K.power_tail(s))
+            assert abs(got / want - 1) < mp.mpf("1e-13")
+        assert K.conservative().tail_amplitude() == 1
+        assert K.power_tail(2.5).tail_amplitude() == 1
+        assert K.kuramoto().tail_amplitude is None
+
+
+@pytest.mark.parametrize("base,g,eta,k_min", [
+    ("conservative", 3.8, 1.0, 1.0), ("conservative", 2.6, 0.5, 1.0),
+    ("conservative", 4.4, 1.0, 1.0), ("conservative", 4.4, 1.0, 2.0),
+    ("gaussian", 2.5, 0.25, 1.0), ("gaussian", 3.0, 0.5, 3.0),
+    ("power2.5", 3.0, 0.5, 1.0), ("kuramoto", 3.8, 1.0, 2.0),
+    ("kuramoto", 3.4, 0.5, 0.5), ("kuramoto_generic", 3.8, 1.0, 2.0)])
+def test_tail_amplitude_of_averaged_kernels(base, g, eta, k_min):
+    """heterogeneous(...).tail_amplitude() against closed forms.  With
+    a = (gamma-2)/eta and v_unit = k_min^eta, Wt(v) = a X^-a int_0^X
+    x^(a-1) W(x) dx, X = v/v_unit, so for a < s0 the tail is
+    C v^-a with C = a v_unit^a int_0^inf x^(a-1) W(x) dx:
+    conservative base a pi / (2 sin(pi a/2)); Gaussian base
+    a Gamma(a/2) / 2; Kuramoto base (a/2) B(a/2, 3/2); W = 1/(1+x^s0)
+    a (pi/s0) / sin(pi a/s0).  For a > s0 the base's tail C0 x^-s0 sets
+    it, C = a C0 v_unit^s0 / (a - s0).  The value is also checked to be
+    the limit of W(v) v^s at v = 1e20, which approaches it with a relative
+    correction of order X^-|a - s0| (measured: 9.8e-5 for |a - s0| = 0.2,
+    1.1e-8 and 1.4e-8 for 0.4, 9.4e-11 for 0.5, at most 4.2e-15 for the
+    rest)."""
+    with mp.workdps(15):
+        gm, em, km = mp.mpf(g), mp.mpf(eta), mp.mpf(k_min)
+        a = (gm - 2) / em
+        vu = km ** em
+        bases = {"conservative": (K.conservative(), mp.mpf(2)),
+                 "gaussian": (K.gaussian_kernel(), mp.inf),
+                 "power2.5": (K.power_tail(2.5), mp.mpf("2.5")),
+                 "kuramoto": (K.kuramoto(), mp.inf),
+                 "kuramoto_generic": (K.Kernel("compact", K.kuramoto().W,
+                                               None, 1.0), mp.inf)}
+        kern, s0 = bases[base]
+        if a < s0:
+            if base == "conservative":
+                J = mp.pi / (2 * mp.sin(mp.pi * a / 2))
+            elif base == "gaussian":
+                J = mp.gamma(a / 2) / 2
+            elif base.startswith("kuramoto"):
+                J = mp.beta(a / 2, mp.mpf(3) / 2) / 2
+            else:
+                J = (mp.pi / s0) / mp.sin(mp.pi * a / s0)
+            want = a * vu ** a * J
+        else:
+            want = a * vu ** s0 / (a - s0)        # C0 = 1 for these bases
+        het = K.heterogeneous(kern, g, eta=eta, k_min=k_min)
+        got = het.tail_amplitude()
+        assert abs(got / want - 1) < mp.mpf("1e-13")      # measured <= 9e-16
+        # the limit of W(v) v^s: within ten times the expected correction
+        v = mp.mpf(10) ** 20
+        bound = max(mp.mpf("1e-13"), 10 * (v / vu) ** -abs(a - s0))
+        assert abs(het.W(v) * v ** het.tail / got - 1) < bound

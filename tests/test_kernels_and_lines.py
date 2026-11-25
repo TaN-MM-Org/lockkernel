@@ -283,9 +283,10 @@ def test_voigt_refusals():
         L.voigt(0.0, 1.0)
     with pytest.raises(ValueError, match="fwhm_lorentz"):
         L.voigt(1.0, -1.0)
-    # since 1.6.0 voigt has a float distribution; bimodal_gaussian still not
+    # since 1.6.0 voigt has a float distribution, and since 1.7.0
+    # bimodal_gaussian too; a line built without one still refuses
     with pytest.raises(NotImplementedError):
-        L.bimodal_gaussian(4.0).cdf(0.0)
+        LineShape("no_float", L.gaussian(1.0).pdf, 1.0).cdf(0.0)
     with pytest.raises(ValueError, match="sigma"):
         L.VoigtDistribution(0.0, 1.0)
 
@@ -429,3 +430,107 @@ def test_physicality_and_valid_window():
     assert physicality(bad, sysm)[1] > 1.1
     assert valid_window([st, st, bad, st], sysm) == 1
     assert valid_window([bad, st], sysm) == -1
+
+
+# ---------------------------------------------------------------------------
+# New in 1.7.0
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("fg", [1e-6, 1e-8, 1e-10])
+def test_voigt_density_with_a_narrow_gaussian_part(fg):
+    """1.6.0 set the guard digits from |Re z| only, so near the center of a
+    line whose Lorentzian part is much wider than its Gaussian part
+    Re w(z) lost about 2 log10|Im z| digits: at 15 digits p(0) was 3.9e-15
+    (relative) off for a width ratio 1e6 and 5.5e-11 for 1e8.  Against the
+    120-digit evaluation (measured at most 1.1e-16 now)."""
+    with mp.workdps(15):
+        line = L.voigt(fg, 1.0)
+        for d in ("0", "1e-3", "0.3", "10"):
+            got = line.pdf(mp.mpf(d))
+            assert abs(got / _voigt_ref(mp.mpf(d), fg, 1.0) - 1) < mp.mpf("1e-14")
+
+
+def _bimodal_sf_ref(x, a, w):
+    """sf of two half-weight normals at +a and -a: (erfc((x-a)/(w sqrt 2))
+    + erfc((x+a)/(w sqrt 2))) / 4, by mpmath at 30 digits."""
+    with mp.workdps(30):
+        x, a, w = mp.mpf(x), mp.mpf(a), mp.mpf(w)
+        r2 = w * mp.sqrt(2)
+        return (mp.erfc((x - a) / r2) + mp.erfc((x + a) / r2)) / 4
+
+
+@pytest.mark.parametrize("sep,width", [(4.0, 1.0), (1.0, 1.0), (2.0, 0.5),
+                                       (-10.0, 2.0)])
+def test_bimodal_distribution(sep, width):
+    """bimodal_gaussian(...).frozen (new in 1.7.0) against the closed form
+    of its tail from the center to 37 widths (sf down to 1e-300), on both
+    sides, to a relative 3e-13 (measured 1.1e-13, which is SciPy's own
+    normal tail far out); ppf round trips to 3e-13 from q = 1e-300 to the
+    center (measured 7.2e-14); its pdf equals the line's mpmath density
+    (measured 3.5e-14)."""
+    line = L.bimodal_gaussian(sep, width)
+    d = line.frozen
+    a = abs(sep) / 2
+    for x in (0.0, 0.1, 1.0, 2.0, 3.0, 5.0, 10.0, 20.0, 30.0, 37.0):
+        want = float(_bimodal_sf_ref(x * width, a, width))
+        for got in (d.sf(x * width), d.cdf(-x * width)):
+            assert abs(got / want - 1) < 3e-13
+        assert abs(d.cdf(x * width) - (1 - want)) < 1e-15
+        assert abs(d.pdf(x * width) / float(line.pdf(x * width)) - 1) < 1e-13
+    for q in (1e-300, 1e-100, 1e-20, 1e-8, 0.01, 0.2, 0.4999):
+        x = d.ppf(q)
+        assert x < 0 and abs(d.cdf(x) / q - 1) < 3e-13
+    for q in (0.75, 0.99):
+        assert abs(d.sf(d.ppf(q)) / (1 - q) - 1) < 3e-13
+    assert d.ppf(0.5) == 0.0 and d.ppf(0.0) == -np.inf and d.ppf(1.0) == np.inf
+    assert np.isnan(d.ppf(-0.1)) and d.sf(np.inf) == 0.0
+    arr = d.ppf(np.array([0.25, 0.75]))
+    assert arr.shape == (2,) and arr[0] == -arr[1]
+
+
+def test_bimodal_distribution_against_samples():
+    """20000 seeded samples of a normal plus a random sign times a: a
+    Kolmogorov-Smirnov test accepts the distribution (p = 0.98 with this
+    seed) and rejects a single normal of the same variance (p below
+    1e-100)."""
+    from scipy import stats
+    d = L.bimodal_gaussian(4.0).frozen
+    rng = np.random.default_rng(3)
+    x = rng.normal(0.0, 1.0, 20000) + 2.0 * rng.choice([-1.0, 1.0], 20000)
+    assert stats.kstest(x, d.cdf).pvalue > 0.01
+    assert stats.kstest(x, stats.norm(scale=np.sqrt(5.0)).cdf).pvalue < 1e-100
+    with pytest.raises(ValueError, match="width"):
+        L.BimodalDistribution(1.0, 0.0)
+    with pytest.raises(ValueError, match="a must"):
+        L.BimodalDistribution(-1.0, 1.0)
+
+
+def test_class_table_and_build_system_check_their_inputs():
+    """1.6.0 accepted M_tail = 0 and dropped the tail population, then
+    renormalized (Lorentzian line of FWHM 1: the 10.5 % beyond 3 widths was
+    lost, so the class table's center was 12 % too dense); a negative
+    core_edge gave the core classes in reverse order and no tail; delta_max
+    below core_edge gave tail classes inside the core; M_core = 0 raised
+    ZeroDivisionError; build_system took a negative N and gave negative
+    populations."""
+    from lockkernel.ensemble import build_system, class_table
+    line = L.lorentzian(1.0)
+    for kw in (dict(M_tail=0), dict(M_core=0), dict(M_core=2.5),
+               dict(M_core=True), dict(M_spec=0, free_beyond=20.0)):
+        with pytest.raises(ValueError, match="whole number"):
+            class_table(line, **kw)
+    for kw in (dict(core_edge=-3.0), dict(core_edge=np.nan),
+               dict(delta_max=0.0), dict(free_beyond=-1.0)):
+        with pytest.raises(ValueError, match="finite and positive"):
+            class_table(line, **kw)
+    with pytest.raises(ValueError, match="beyond core_edge"):
+        class_table(line, core_edge=50.0, delta_max=10.0)
+    # with free classes delta_max may lie inside (see the test above)
+    class_table(line, core_edge=3.0, free_beyond=5000.0, delta_max=1000.0)
+    for N in (0, -5, np.inf):
+        with pytest.raises(ValueError, match="emitter number"):
+            build_system(line, N, 1.0)
+    with pytest.raises(ValueError, match="chiN"):
+        build_system(line, 10.0, np.nan)
+    with pytest.raises(ValueError, match="free_factor"):
+        build_system(line, 10.0, 1.0, free_factor=0.0)

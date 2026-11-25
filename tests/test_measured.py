@@ -129,7 +129,7 @@ def test_metadata_and_no_matplotlib():
          "print('matplotlib' in sys.modules)"],
         capture_output=True, text=True, check=True)
     version, has_mpl = out.stdout.split()
-    assert version == "1.6.0"
+    assert version == "1.7.0"
     assert has_mpl == "False"
 
 
@@ -441,3 +441,88 @@ def test_input_checks_of_the_lab_half():
         kernel_tail_from_beta(1.0, float("nan"))
     with pytest.raises(ValueError, match="n_sigma"):
         kernel_tail_from_beta(1.0, 0.02, n_sigma=-1.0)
+
+
+# ---------------------------------------------------------------------------
+# New in 1.7.0
+# ---------------------------------------------------------------------------
+
+def test_coupling_offset_is_absorbed_by_the_threshold():
+    """Shifting every coupling by d shifts the fitted chi_c by d, leaves
+    beta unchanged and multiplies A by ((chi_c + d)/chi_c)^beta: the law
+    R = A ((chi - chi_c)/chi_c)^beta keeps chi - chi_c, and the constant
+    factor of eps goes into A.  Checked by refitting shifted data (the
+    README said before 1.7.0 that an offset changes the exponent; it does
+    not).  Then the quadrature sums of with_calibration(chi_offset=...)."""
+    chi, r = _power_law(1e-5, 1e-2, 12)
+    rn = r * np.exp(np.random.default_rng(5).normal(0.0, SLOG, r.size))
+    f = fit_branch(chi, rn, REF, sigma_r=SLOG * rn)
+    for d in (-0.003, 0.002, 0.04):
+        fd = fit_branch(chi + d, rn, REF, sigma_r=SLOG * rn)
+        # the differences are the fit's own convergence tolerance
+        assert abs(fd.chi_c - (f.chi_c + d)) < 1e-9 * f.chi_c   # measured 5.7e-13
+        assert abs(fd.beta - f.beta) < 1e-7                     # measured 7.4e-9
+        want_A = f.amplitude * ((f.chi_c + d) / f.chi_c) ** f.beta
+        assert abs(fd.amplitude / want_A - 1) < 3e-7            # measured 5.5e-8
+        assert abs(fd.sigma_beta / f.sigma_beta - 1) < 1e-6     # measured 1.3e-8
+    so = 2e-6
+    c = with_calibration(f, chi_offset=so)
+    assert c.sigma_chi_c == pytest.approx(np.hypot(f.sigma_chi_c, so), rel=1e-12)
+    assert c.sigma_amplitude == pytest.approx(
+        np.hypot(f.sigma_amplitude, f.amplitude * f.beta * so / f.chi_c),
+        rel=1e-12)
+    assert (c.chi_c, c.beta, c.amplitude, c.sigma_beta) == \
+        (f.chi_c, f.beta, f.amplitude, f.sigma_beta)
+    assert c.calibration_offset == so and c.calibration_rel == (0.0, 0.0)
+    all3 = with_calibration(f, 0.02, 0.05, so)
+    assert all3.sigma_chi_c == pytest.approx(np.sqrt(
+        f.sigma_chi_c ** 2 + (0.02 * f.chi_c) ** 2 + so ** 2), rel=1e-12)
+    with pytest.raises(ValueError, match="already"):
+        with_calibration(c, chi_scale_rel=0.01)
+    with pytest.raises(ValueError, match="chi_offset"):
+        with_calibration(f, chi_offset=-1e-6)
+    with pytest.raises(ValueError, match="chi_offset"):
+        with_calibration(f, chi_offset=np.nan)
+
+
+def test_tail_from_beta_on_other_line_tops():
+    """center_order n: beta = 1/(s-1) for 1 < s < n+1, 1/n beyond, so the
+    class value is 1/n and a flat top (n = inf) names a tail for every
+    beta > 0.  The default n = 2 gives exactly the 1.6.0 results and
+    messages (README example 5 prints one)."""
+    import math
+    # flat top: beta below 1/2 names s > 3 (the box line with s = 4 gives
+    # beta = 1/3 exactly, test_onset.py)
+    s, ds = kernel_tail_from_beta(1 / 3, 0.002, center_order=math.inf)
+    assert s == pytest.approx(4.0, rel=1e-15) and ds == pytest.approx(0.018, rel=1e-12)
+    with pytest.raises(ValueError, match="consistent with 0"):
+        kernel_tail_from_beta(0.01, 0.01, center_order=math.inf)
+    # n = 4 (two peaks two widths apart): 1/3 names s = 4, 1/4 only s >= 5
+    assert kernel_tail_from_beta(1 / 3, 0.002, center_order=4)[0] == pytest.approx(4.0)
+    with pytest.raises(ValueError, match="consistent with 1/4.*s >= 5"):
+        kernel_tail_from_beta(0.26, 0.01, center_order=4)
+    with pytest.raises(ValueError, match="below 1/4"):
+        kernel_tail_from_beta(0.2, 0.01, center_order=4)
+    # the default is the rounded top, with the old messages
+    with pytest.raises(ValueError) as err:
+        kernel_tail_from_beta(0.52, 0.02)
+    assert str(err.value) == (
+        "beta = 0.52 +- 0.02 is consistent with 1/2, which identifies only "
+        "the CLASS s >= 3 (compact support or decay faster than |u|^-3); no "
+        "single tail exponent can be named from it")
+    with pytest.raises(ValueError) as err:
+        kernel_tail_from_beta(0.4, 0.01)
+    assert "below 1/2, which no locking kernel produces in the dictionary " \
+        "beta = 1/(s-1) (1 < s < 3), 1/2 (s >= 3) of a line with a rounded " \
+        "center" in str(err.value)
+    assert kernel_tail_from_beta(1.0, 0.02, center_order=2) == \
+        kernel_tail_from_beta(1.0, 0.02)
+    with pytest.raises(ValueError, match="center_order"):
+        kernel_tail_from_beta(1.0, 0.02, center_order=0)
+    # predicted_beta and kernel_tail_from_beta invert each other
+    for n in (1.0, 2.0, 4.0, math.inf):
+        for s_true in (1.2, 1.7, 2.0, 2.5):
+            if s_true < n + 1:
+                b = predicted_beta(s_true, center_order=n)
+                assert kernel_tail_from_beta(b, 0.0, center_order=n)[0] == \
+                    pytest.approx(s_true, rel=1e-14)

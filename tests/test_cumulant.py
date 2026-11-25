@@ -253,3 +253,22 @@ def test_full_exact_refusals():
         full_exact([0.0, float("nan")], 1.0, [0.1])
     with pytest.raises(ValueError, match="finite"):
         full_exact([0.0, 1.0], float("inf"), [0.1])
+
+
+def test_symmetric_exact_refusals():
+    """New in 1.7.0.  1.6.0 took any N: N = 2.5 gave a contrast of 1.015,
+    above the largest possible value 1, and N = 0 raised
+    ZeroDivisionError.  N must be a whole number >= 1, chiN and the times
+    finite; N = 1 is a single free spin (contrast 1, xi^2 = 1)."""
+    for N in (0, 2.5, -2, True, float("nan"), float("inf"), "4"):
+        with pytest.raises(ValueError, match="whole number"):
+            symmetric_exact(N, 1.0, [0.1])
+    with pytest.raises(ValueError, match="finite"):
+        symmetric_exact(4, float("nan"), [0.1])
+    with pytest.raises(ValueError, match="finite"):
+        symmetric_exact(4, 1.0, [0.1, float("inf")])
+    R, xi = symmetric_exact(1, 1.0, [0.0, 0.7])
+    assert np.all(np.abs(R - 1) < 1e-15) and np.all(np.abs(xi - 1) < 1e-15)
+    # N given as a float with a whole value is the same N
+    assert np.array_equal(symmetric_exact(8.0, 1.5, [0.3])[0],
+                          symmetric_exact(8, 1.5, [0.3])[0])
