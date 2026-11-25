@@ -43,6 +43,11 @@ the exact branch of a model, not only the power law near the threshold.
 That tests the model and calibrates the coupling scale.
 Since 1.6.0 that whole-branch fit also takes the errors of the measured
 couplings, and a Voigt line can be used in the dynamics modules.
+Since 1.7.0 the exponent rule also covers lines whose top is not rounded
+(a flat top, or two peaks two widths apart), the calibration error bars
+take an offset of the couplings, the two-peaked line can be used in the
+dynamics, and the exact solution keeps its precision far above the line
+width and beyond 20 digits.
 When the data cannot
 support the number asked for, it stops with an error message that says
 why, rather than returning a number that looks fine but is not.
@@ -64,7 +69,7 @@ why, rather than returning a number that looks fine but is not.
 ## A short guide to the words used here
 
 - **Detuning** `delta` -- how far one oscillator's natural frequency
-  is from the centre of the group.
+  is from the center of the group.
 - **Line shape** `p(delta)` -- the distribution of detunings across
   the group (the name comes from spectroscopy, where it is the shape
   of a spectral line). The package ships a Lorentzian, a Gaussian, a
@@ -84,7 +89,7 @@ why, rather than returning a number that looks fine but is not.
 - **Locking kernel** `W(u)` -- the time-averaged share of an
   oscillator that lines up with the group, as a function of its
   detuning in units of the locking bandwidth, `u = delta/Omega`.
-  `W(0) = 1` (an oscillator at the centre follows perfectly) and `W`
+  `W(0) = 1` (an oscillator at the center follows perfectly) and `W`
   is even. Its **mass** `m` is its area, `m = integral W(u) du`. Its
   **tail exponent** `s` describes how fast it falls far out:
   `W ~ |u|^-s`. The package's kernels are:
@@ -109,7 +114,8 @@ why, rather than returning a number that looks fine but is not.
   dip beyond). On a line that is flat at the center,
   such as `box`, a tail gives `beta = 1/(s-1)` for every `s > 1`
   (so below 1/2 once `s > 3`), and a kernel with no tail gives a jump
-  instead of a power law (see [Limits](#limits)).
+  instead of a power law (see [Limits](#limits)). Since 1.7.0 the rule
+  takes the shape of the top as a parameter (example 16).
 - **Order of the onset** -- for the conservative kernel, the sign of
   one number `c` (an integral over the line shape) decides it:
   `c > 0` gives a smooth (continuous) onset, `c < 0` a jump with
@@ -147,10 +153,10 @@ and mpmath 1.2 or newer, and nothing else.
 ## Examples
 
 Each example below runs as written, and the output shown is what it
-printed with lockkernel 1.6.0 (examples 1 to 12 print the same as with
-1.4.0 and 1.5.x; examples 13 and 14 are new). Line widths, couplings
-and noise levels are illustrative values, not taken from any
-experiment.
+printed with lockkernel 1.7.0 (examples 1 to 14 print the same as with
+1.6.0, and 1 to 12 as with 1.4.0 and 1.5.x; examples 15 to 19 are new).
+Line widths, couplings and noise levels are illustrative values, not
+taken from any experiment.
 
 ### 1. Threshold and exponent from the theory
 
@@ -183,7 +189,7 @@ The threshold is `1/(p(0) m)`: the kernel enters only through its
 mass, so the Kuramoto threshold (mass `pi/2`) is twice the
 conservative one (mass `pi`) on every line. `extract_beta` steps the
 exact branch towards the onset and returns the local slope between
-neighbouring points; the list settling down is the evidence that the
+neighboring points; the list settling down is the evidence that the
 exponent has been reached. List the exponents of `Omega` so that the
 one closest to the onset comes last, because the last entry is the
 one to quote. Here it is within 0.1 % of `2/3`.
@@ -420,7 +426,7 @@ sqrt(pi) = 1.77245385091
 
 For a kernel with no tail, or a tail `s > 3`, the onset is
 `R = A eps^(1/2)`. The first correction to the self-consistency then
-comes from the curvature of the line at its centre, `p''(0)`, and
+comes from the curvature of the line at its center, `p''(0)`, and
 `amplitude_curvature` returns
 `A = G0^(3/2) sqrt(2 / (-p''(0) M2))`, where `G0 = p(0) m` and
 `M2 = integral u^2 W(u) du` is the kernel's second moment
@@ -767,6 +773,243 @@ within 5e-3 at 2 and 3 times the threshold, as for the Lorentzian line
 (observed 5e-4 and 1e-5). A class table with 800 core classes takes
 about a second to build.
 
+### 15. Precision beyond 20 digits, and far above the line width
+
+```python
+import mpmath as mp
+from lockkernel.lineshapes import lorentzian, gaussian
+from lockkernel.kernels import conservative
+from lockkernel.parametric import amplitude, G_of_Omega
+
+# The amplitude beyond 20 digits: 1 on a Lorentzian line, pi/2 on a Gaussian one.
+mp.mp.dps = 50
+print("A - 1      =", mp.nstr(amplitude(lorentzian(1.0)) - 1, 3))
+print("A/(pi/2)-1 =", mp.nstr(amplitude(gaussian(1.0)) / (mp.pi / 2) - 1, 3))
+
+# Far above the line width: G = 1/(1/2 + Omega) on a Lorentzian line of FWHM 1.
+mp.mp.dps = 15
+for Omega in ("1e9", "1e12", "1e15"):
+    Om = mp.mpf(Omega)
+    err = G_of_Omega(lorentzian(1.0), conservative(), Om) * (mp.mpf(1) / 2 + Om) - 1
+    print(f"Omega = {Omega}: relative error of G {mp.nstr(err, 2)}")
+```
+
+```
+A - 1      = -2.67e-51
+A/(pi/2)-1 = -1.34e-51
+Omega = 1e9: relative error of G -2.2e-16
+Omega = 1e12: relative error of G -2.2e-16
+Omega = 1e15: relative error of G -2.2e-16
+```
+
+Two corrections of 1.7.0. `c_coefficient`, and so `amplitude`, leaves
+out the first 1e-20 line widths of its integral, where the integrand
+cancels badly. Up to 1.6.0 that piece was simply dropped, so the
+amplitude was good to about 20 digits however high `mp.dps` was set (at
+50 digits the first line printed `1.27e-20`). Next to the center the
+integrand is `p''(0)/2` to a relative `1e-40`, so the piece is now added
+in closed form, and the amplitude is good to about 60 digits.
+
+Far above the line width, `G(Omega)` falls like `1/Omega`, and part of
+its integral spans many decades. Up to 1.6.0 that part was taken on a
+linear scale, and mpmath's quadrature, which stops on an absolute error
+estimate, was not told how small the result is. On this line the
+relative error of `G` was `-3.2e-13`, `-3.2e-10` and `0.023` at the
+three `Omega` above. Now that part is integrated in `log(u)` and scaled
+to order one, and `G` keeps the working precision out to at least
+`Omega = 1e30`. Nothing changes for `Omega` up to the line width, where
+the onset is.
+
+### 16. Lines whose top is not rounded
+
+```python
+import math
+import mpmath as mp
+from lockkernel import kernel_tail_from_beta
+from lockkernel.lineshapes import bimodal_gaussian, box
+from lockkernel.kernels import kuramoto, power_tail, predicted_beta
+from lockkernel.parametric import extract_beta
+
+mp.mp.dps = 20
+# Two Gaussian peaks exactly two widths apart: p(0) - p(d) ~ d^4 at the center.
+line = bimodal_gaussian(2.0)
+for kern in (kuramoto(), power_tail(4.0), power_tail(2.5)):
+    beta = extract_beta(line, kern, [-3, -4, -5, -6])[-1]
+    print(f"{kern.name:9s} branch {mp.nstr(beta, 8)}, "
+          f"predicted {predicted_beta(kern.tail, center_order=4):.6f}")
+
+# A flat-topped (box) line: beta = 1/(s-1) also beyond s = 3.
+beta = float(extract_beta(box(1.0), power_tail(5.0), [-3, -4, -5, -6])[-1])
+print(f"box line, s = 5: beta = {beta:.8f}")
+s, s_err = kernel_tail_from_beta(beta, 0.002, center_order=math.inf)
+print(f"kernel tail from beta: s = {s:.3f} +- {s_err:.3f}")
+try:
+    kernel_tail_from_beta(beta, 0.002)        # the rounded-top default
+except ValueError as err:
+    print("rounded top refuses:", str(err).split(", which")[0])
+```
+
+```
+kuramoto  branch 0.25, predicted 0.250000
+power4    branch 0.33333359, predicted 0.333333
+power2.5  branch 0.66666666, predicted 0.666667
+box line, s = 5: beta = 0.25000000
+kernel tail from beta: s = 5.000 +- 0.032
+rounded top refuses: beta = 0.25 +- 0.002 lies significantly below 1/2
+```
+
+The rule `beta = 1/(s-1)` or `1/2` assumes a line with a rounded top,
+`p(0) - p(delta) ~ delta^2` at the center. The same argument works for
+any power `n` in `p(0) - p(delta) ~ |delta|^n`: the kernel's tail wins
+while `s < n + 1`, and the center of the line wins beyond, so
+
+`beta = 1/(s-1)` for `1 < s < n+1`, and `beta = 1/n` for `s >= n+1`.
+
+`predicted_beta` and `kernel_tail_from_beta` take this power as
+`center_order` (new in 1.7.0; default 2). Two Gaussian peaks exactly two
+widths apart have `n = 4`, since there
+`p(delta) = p(0) e^(-delta^2/2) cosh(delta) = p(0) (1 - delta^4/12 + ...)`
+(width 1). The exact branch agrees: `1/4` for the Kuramoto kernel, `1/3`
+for `s = 4`, and `2/3` for `s = 2.5`, where the tail wins. A box line is
+flat around its center (`n = math.inf`): every tail gives
+`beta = 1/(s-1)`, here `1/4` for `s = 5`, and with
+`center_order=math.inf` the tail can be read back off it. With the
+default, a rounded top, a `beta` below 1/2 is refused as before. The
+tests also check a line with a cusp at its center (`n = 1`, the Laplace
+line `e^-|delta| / 2`).
+
+### 17. Exact tail amplitudes
+
+```python
+import mpmath as mp
+from lockkernel.lineshapes import gaussian
+from lockkernel.kernels import conservative, heterogeneous
+from lockkernel.parametric import amplitude_general
+
+mp.mp.dps = 15
+# Conservative spins whose coupling weights follow P(k) ~ k^-3.8: the averaged
+# kernel falls like C |u|^-1.8, but reaches that only slowly.
+ker = heterogeneous(conservative(), degree_exponent=3.8)
+v = mp.mpf(10) ** 6
+print("W(v) v^s at v = 1e6:", mp.nstr(ker.W(v) * v ** ker.tail, 8))
+print("exact tail amplitude C:", mp.nstr(ker.tail_amplitude(), 8))
+print("closed form 1.8 pi / (2 sin(0.9 pi)):",
+      mp.nstr(mp.mpf("1.8") * mp.pi / (2 * mp.sin(mp.mpf("0.9") * mp.pi)), 8))
+print("amplitude A on a Gaussian line:", mp.nstr(amplitude_general(gaussian(1.0), ker), 8))
+```
+
+```
+W(v) v^s at v = 1e6: 8.581905
+exact tail amplitude C: 9.1497666
+closed form 1.8 pi / (2 sin(0.9 pi)): 9.1497666
+amplitude A on a Gaussian line: 0.55853057
+```
+
+`amplitude_general` needs the tail amplitude `C` in `W ~ C |u|^-s`. Up
+to 1.6.0 it read `C` off the kernel at `|u| = 10^6`. For this averaged
+kernel that value is 6 % low, so `amplitude_general` refused it unless
+`C` was passed by hand. For `power_tail(s)` it is low by a relative
+`10^(-6 s)`, which made `A` 2.5e-6 off at `s = 1.1`. Since 1.7.0 a
+`Kernel` can carry its exact `C` (`tail_amplitude`, a function that
+evaluates it at the current precision): 1 for `conservative` and
+`power_tail`, and for the averages of `heterogeneous` a closed form or
+one integral, `C = a k_min^(eta a) int_0^inf x^(a-1) W(x) dx` with
+`a = (gamma-2)/eta` when the spread of coupling strengths sets the tail,
+or `a C0 k_min^(eta s0) / (a - s0)` when the base kernel's own tail
+`C0 |x|^-s0` does. The tests hold it to closed forms for four base
+kernels. The amplitude 0.55853 is the value that 1.3.0's notes give for
+this case from the closed-form `C`.
+
+### 18. An offset in the couplings
+
+```python
+import numpy as np
+from lockkernel import fit_branch, with_calibration
+
+# The power law of example 11 (chi_c = 0.5, beta = 2/3, A = 0.65), 1 % noise.
+rng = np.random.default_rng(3)
+eps = np.geomspace(1e-4, 1e-1, 14)
+r = 0.65 * eps ** (2 / 3) * np.exp(rng.normal(0.0, 0.01, eps.size))
+chi = 0.5 * (1 + eps)
+ref = "illustrative: power law + seeded noise"
+
+# The same data with every coupling read 0.002 too low (an offset):
+for name, x in (("as recorded:", chi), ("offset -0.002:", chi - 0.002)):
+    f = fit_branch(x, r, ref, sigma_r=0.01 * r)
+    print(f"{name:15s} chi_c = {f.chi_c:.6f}, beta = {f.beta:.6f}, A = {f.amplitude:.6f}")
+
+# The zero of the coupling is known to +- 1e-5:
+f = with_calibration(fit_branch(chi, r, ref, sigma_r=0.01 * r), chi_offset=1e-5)
+print(f"with the offset error: chi_c +- {f.sigma_chi_c:.1e}, "
+      f"A +- {f.sigma_amplitude:.3f}, beta +- {f.sigma_beta:.4f} (unchanged)")
+```
+
+```
+as recorded:    chi_c = 0.499998, beta = 0.669255, A = 0.656151
+offset -0.002:  chi_c = 0.497998, beta = 0.669255, A = 0.654393
+with the offset error: chi_c +- 1.0e-05, A +- 0.007, beta +- 0.0020 (unchanged)
+```
+
+An offset common to all couplings (the zero of a power meter, say) moves
+the fitted threshold by the same amount, and nothing else in
+`chi - chi_c`. The reduced coupling `eps = (chi - chi_c)/chi_c` changes
+only by a constant factor, which the amplitude takes up:
+`A` changes by `((chi_c + d)/chi_c)^beta`, here by the factor 0.99732.
+The exponent does not change at all. (Up to 1.6.0 this README said that
+an offset changes the exponent. It does not, and the tests check it by
+refitting shifted data.) `with_calibration(fit, chi_offset=...)`, new in
+1.7.0, adds the uncertainty of such an offset: to `chi_c` directly and to
+`A` as `A beta chi_offset / chi_c`, in quadrature with the rest.
+
+### 19. Hysteresis in the dynamics of a two-peaked line
+
+```python
+import numpy as np
+import mpmath as mp
+from lockkernel.lineshapes import bimodal_gaussian
+from lockkernel.kernels import conservative
+from lockkernel.parametric import G_of_Omega
+from lockkernel.ensemble import build_system
+from lockkernel.cumulant import evolve_meanfield
+
+line = bimodal_gaussian(4.0)     # example 8: hysteresis from chiN = 3.4934 to 5.8956
+dist = line.frozen               # new in 1.7.0
+print(f"P(|delta| > 5) = {2 * dist.sf(5.0):.6e}, quartile {dist.ppf(0.75):.6f}")
+
+# Mean-field dynamics of 1e10 emitters, all starting in phase, below the threshold.
+sysm = build_system(line, 1e10, 4.5, M_core=400, M_tail=24, delta_max=2000 * line.scale)
+t = np.linspace(0.0, 600.0, 500)
+s, _ = evolve_meanfield(sysm, 600.0, t_eval=t)
+free = 0.5 * np.exp(1j * np.outer(sysm.spec_delta, t))
+R = 2 * np.abs(sysm.n @ s + sysm.spec_n @ free) / sysm.N
+print(f"chiN = 4.5: mean R over the second half {R[t > 300].mean():.4f}")
+
+# The upper branch of the exact solution at the same coupling
+mp.mp.dps = 15
+chi = lambda o: 1 / G_of_Omega(line, conservative(), o)
+Om = mp.findroot(lambda o: chi(o) - 4.5, (2, 9), solver="anderson")
+print("upper branch at chiN = 4.5: R =", mp.nstr(Om / chi(Om), 4))
+```
+
+```
+P(|delta| > 5) = 1.349898e-03, quartile 2.000079
+chiN = 4.5: mean R over the second half 0.7202
+upper branch at chiN = 4.5: R = 0.7218
+```
+
+Since 1.7.0 `bimodal_gaussian` has a floating-point distribution,
+`line.frozen`, a `BimodalDistribution` with `pdf`, `cdf`, `sf` and
+`ppf`, so the two-peaked line can be turned into detuning classes for
+the dynamics. Its tail is the sum of SciPy's normal tails, and the
+tests hold it to the closed form with `erfc` (computed by mpmath) out to
+37 widths. Example 8 found that this branch folds: between
+`chiN = 3.4934` and the threshold 5.8956 there is a synchronized state
+as well as the unsynchronized one. Started with every spin in phase, the
+mean-field dynamics at `chiN = 4.5`, below the threshold, stays
+synchronized and settles, within its residual oscillation, on the upper
+branch of the exact solution. The tests hold the two within 5e-3 here
+and at `chiN = 7` (measured 1.6e-3 and 3e-5).
+
 ## Tutorials
 
 Three worked analyses live in [`examples/`](examples). Each makes a
@@ -860,31 +1103,41 @@ directly.
 
 **Line shapes and kernels** (`lockkernel.lineshapes`, `lockkernel.kernels`)
 
-- `LineShape` -- a symmetric density with its value at the centre
+- `LineShape` -- a symmetric density with its value at the center
   (`p0()`), and, where available, a floating-point `cdf` and `ppf`.
   Makers: `lorentzian`, `gaussian`, `student_t`, `box`,
   `bimodal_gaussian` and (new in 1.4.0) `voigt(fwhm_gauss,
-  fwhm_lorentz)`; `LINESHAPES` maps names to them. Every maker except
-  `bimodal_gaussian` gives a floating-point distribution (`frozen`).
+  fwhm_lorentz)`; `LINESHAPES` maps names to them. Every maker gives a
+  floating-point distribution (`frozen`); `bimodal_gaussian` has one
+  since 1.7.0.
 - `VoigtDistribution(sigma, gamma)` (new in 1.6.0, example 14): the
   floating-point distribution of a Voigt line (`pdf`, `cdf`, `sf`,
   `ppf`), with `sigma` the standard deviation of the Gaussian part and
   `gamma` the half width of the Lorentzian part. `voigt(...).frozen` is
   one.
+- `BimodalDistribution(a, width)` (new in 1.7.0, example 19): the same
+  for two normal distributions of standard deviation `width` at `+a` and
+  `-a`. `bimodal_gaussian(sep, width).frozen` is one, with `a = |sep|/2`.
 - `Kernel` -- an even kernel with `W(0) = 1`, its tail exponent, its
   support, `mass()` and `second_moment()` (the integral of
   `u^2 W(u)`, finite only for compact support, fast decay or `s > 3`).
   New in 1.4.0: `breaks`, points where `W` has a kink, which the
-  integrals use as break points (empty for the shipped kernels).
-  Makers: `conservative`, `kuramoto`,
+  integrals use as break points (empty for the shipped kernels). New in
+  1.7.0 (example 17): `tail_amplitude`, a function that returns the exact
+  `C` in `W ~ C |u|^-s` at the current precision, or `None` when it is
+  not known. Makers: `conservative`, `kuramoto`,
   `power_tail(s)`, `gaussian_kernel`; `KERNELS` maps names to them.
 - `heterogeneous(base, degree_exponent, eta=1, k_min=1)` -- the kernel
   averaged over a power-law spread of coupling strengths (example 6).
   Since 1.4.0 any base kernel is reduced to one average over the base
   kernel, `a X^-a integral_0^X x^(a-1) W(x) dx` with `a = (gamma-2)/eta`
   and `X = |v|/k_min^eta`, which stays accurate far out in the tail.
-- `predicted_beta(s)` -- the exponent the rule gives for tail `s`
-  (`None` meaning no algebraic tail), for a line with a rounded top.
+  Since 1.7.0 the averaged kernel carries its exact tail amplitude.
+- `predicted_beta(s, center_order=2)` -- the exponent the rule gives for
+  tail `s` (`None` meaning no algebraic tail). `center_order` (new in
+  1.7.0, example 16) is the power `n` in `p(0) - p(delta) ~ |delta|^n`
+  at the line's center: 2 for a rounded top, 4 for two Gaussian peaks
+  exactly two widths apart, `math.inf` for a flat top.
 
 **The exact solution** (`lockkernel.parametric`, mpmath precision)
 
@@ -934,10 +1187,12 @@ directly.
   (the last two `None` without `sigma_r`; example 10),
   `sigma_chi_used` and `calibration_rel`. `sigma_chi` gives the errors
   of the couplings (example 11).
-- `with_calibration(fit, chi_scale_rel=0, r_scale_rel=0)` -- the same
-  fit with the relative uncertainties of an overall coupling scale and
-  an overall `R` scale added to the error bars of `chi_c` and `A`
-  (example 11).
+- `with_calibration(fit, chi_scale_rel=0, r_scale_rel=0, chi_offset=0)`
+  -- the same fit with the relative uncertainties of an overall coupling
+  scale and an overall `R` scale added to the error bars of `chi_c` and
+  `A` (example 11). New in 1.7.0 (example 18): `chi_offset`, the
+  absolute uncertainty of an offset common to all couplings, recorded in
+  the new `BranchFit.calibration_offset`.
 - New in 1.5.0 (tutorial 3): `fit_exact_branch(chi, r, reference,
   table, sigma_r=None, fit_r_scale=False, sigma_chi=None)` -- fits the
   exact branch of a model (a `BranchTable`) to measured points over
@@ -948,8 +1203,9 @@ directly.
   and `p_value` (the last two `None` without `sigma_r`), `eps_range`,
   `residual_rms_log` and `table_error`. New in 1.6.0 (example 13):
   `sigma_chi`, the errors of the couplings, and `sigma_chi_used`.
-- `kernel_tail_from_beta(beta, sigma_beta=0, n_sigma=2)` -- the tail
-  exponent `s` and its error.
+- `kernel_tail_from_beta(beta, sigma_beta=0, n_sigma=2,
+  center_order=2)` -- the tail exponent `s` and its error.
+  `center_order` (new in 1.7.0, example 16) as in `predicted_beta`.
 - `beta_relative_sigma(n_points, decades, sigma_log)`,
   `points_for_beta(target_sigma_beta, decades, sigma_log)` -- the
   error bar of `beta` for a planned measurement with the threshold
@@ -975,7 +1231,8 @@ directly.
   `physicality` and `valid_window` flag when the truncated state stops
   being physical.
 - `class_table`, `build_system` -- turn a line shape into a finite
-  set of detuning classes that keeps the whole population.
+  set of detuning classes that keeps the whole population. Since 1.7.0
+  they check their inputs (see the refusals below).
 - `symmetric_exact` (all detunings equal, any number of emitters),
   `full_exact` (full quantum problem, up to about twelve emitters; since
   1.5.0 it builds sparse operators, and 10 emitters take about 10 s
@@ -1005,8 +1262,9 @@ gives its inputs and conventions.
   example because `R` hardly changes, as at a jump);
 - `sigma_chi` is given without `sigma_r`, is negative, or is larger
   than a quarter of `chi - chi_c` at some point (new in 1.3.0);
-- `with_calibration` gets a negative uncertainty, or a fit that
-  already includes one;
+- `with_calibration` gets a negative uncertainty (since 1.7.0 also a
+  negative or non-finite `chi_offset`), or a fit that already includes
+  one;
 - the fitted threshold is indistinguishable from the smallest
   coupling: the data do not reach the onset;
 - the fitted points span less than `min_decade` decades of `eps`
@@ -1014,7 +1272,8 @@ gives its inputs and conventions.
   short a range;
 - a fitted `beta` is consistent with 1/2 (only the class `s >= 3` is
   identified), clearly below 1/2 (no kernel gives that; the fit has
-  probably left the near-threshold range), or not positive;
+  probably left the near-threshold range), or not positive. Since 1.7.0
+  `center_order` moves the value 1/2 to `1/n` for another line top;
 - a planned measurement has fewer than 3 points (6 with the threshold
   fitted, as `fit_branch` needs), a number of points that is not a
   whole number, a non-positive or reversed range, a non-positive
@@ -1035,6 +1294,11 @@ gives its inputs and conventions.
 - `power_tail(s)` or `predicted_beta(s)` is asked for `s <= 1` (the
   kernel mass would be infinite), or `heterogeneous` for `gamma <= 2`,
   a non-positive `eta` or `k_min`, or a resulting tail `s <= 1`;
+- (new in 1.7.0) `predicted_beta` or `kernel_tail_from_beta` gets a
+  `center_order` that is not a positive number; `predicted_beta` is
+  asked for a kernel without a tail on a flat-topped line
+  (`center_order=math.inf`), where the order parameter jumps; or
+  `kernel_tail_from_beta` on a flat top gets a `beta` consistent with 0;
 - a line shape is given a width that is not finite and positive;
 - `tail_integral` is asked for `s` outside `1 < s < 3`, where it
   diverges;
@@ -1073,19 +1337,29 @@ gives its inputs and conventions.
 - `amplitude_general` is asked for a kernel without a tail in
   `1 < s < 3`, or (new in 1.3.0) its default tail amplitude `C`, read
   off the kernel at `|u| = 10^6`, differs by more than a relative 1e-6
-  from the value at `10^9` (pass `C` yourself then), or (new in 1.6.0)
+  from the value at `10^9` (pass `C` yourself then; since 1.7.0 this
+  applies only to a kernel without `tail_amplitude`, since the shipped
+  kernels with a tail all carry it), or (new in 1.6.0)
   is asked for a line with `I_s <= 0`, such as two peaks four widths
   apart, where the branch leaves the threshold backwards;
 - `class_exact` gets class populations that are not whole numbers;
-- a line shape without a floating-point distribution
-  (`bimodal_gaussian`; `voigt` has one since 1.6.0) is asked for `cdf`,
-  `ppf` or a class table;
+- (new in 1.7.0) `class_table` gets class counts that are not whole
+  numbers of at least 1, region edges that are not finite and positive,
+  or (without free classes) a `delta_max` not beyond `core_edge`;
+  `build_system` an emitter number that is not finite and positive, a
+  non-finite `chiN` or a `free_factor` that is not finite and positive;
+  `symmetric_exact` an `N` that is not a whole number of at least 1, or
+  a non-finite `chiN` or time;
+- a line shape without a floating-point distribution (a `LineShape`
+  you build yourself without `frozen`; `voigt` has one since 1.6.0 and
+  `bimodal_gaussian` since 1.7.0) is asked for `cdf`, `ppf` or a class
+  table;
 - the solver of the differential equations fails in `evolve` or
   `evolve_meanfield`.
 
 ## How the results are checked
 
-222 automated tests run on every push and pull request, on Python 3.9
+263 automated tests run on every push and pull request, on Python 3.9
 to 3.14, and once more on Python 3.10 with the oldest NumPy (1.22.0),
 SciPy (1.8.0) and mpmath (1.2.1) the package allows. The numerical
 checks compare the package with something independent of it: a closed
@@ -1311,6 +1585,60 @@ simulation)
   matches its closed form on two peaks 1, 1.9 and 1.999 widths apart
   (1e-10); `fold_interval` refuses a degenerate or reversed grid.
 
+**New in 1.7.0** (15 digits unless stated; every reference is a closed
+form, a special function evaluated by mpmath, SciPy, or seeded
+simulation)
+
+- `amplitude` at 40 and 60 digits: 1 on Lorentzian lines of widths 1 and
+  1000 and `pi/2` on a Gaussian line, to `1e-35` at 40 digits (measured
+  2.3e-41 at most) and `1e-58` at 60 (measured 1.7e-60 at most);
+  `c_coefficient` against `tail_integral(line, 2)/pi`, a different
+  integral (measured 4.7e-61 at 60 digits).
+- `G_of_Omega` from `Omega = 1e-3` to `1e30` against
+  `1/(1/2 + Omega)` (Lorentzian line, conservative kernel),
+  `1/(1/2 + sqrt(1/4 + Omega^2))` (Lorentzian line, Kuramoto kernel) and
+  the Bessel form `p(0) (pi/2) e^-z (I0(z) + I1(z))` (Gaussian line,
+  Kuramoto kernel): to 3e-14 at 15 digits (measured 5.4e-15) and 1e-29
+  at 30 (measured 8.9e-31); on a Gaussian line with the conservative
+  kernel against SciPy's `erfcx` (measured 1.1e-15); `R` and `eps` on
+  the branch at `Omega = 1e12`.
+- The exponent on other line tops (`predicted_beta(s, center_order)`)
+  against the exact branch at `Omega = 1e-6` and 20 digits: on two
+  Gaussian peaks two widths apart (`n = 4`) `1/4` for the Kuramoto,
+  Gaussian and `s = 6` kernels, `1/3` for `s = 4` and `2/3` for
+  `s = 2.5`; on the Laplace line `e^-|delta|/2` (`n = 1`) 1 for the
+  Kuramoto kernel and `s = 3`, and 2 for `s = 1.5`. The tolerances
+  follow the size of the next correction, of order `Omega^|s-1-n|`
+  (measured from 1.8e-12 to 2.8e-3). `kernel_tail_from_beta` inverts
+  `predicted_beta` for `n` = 1, 2, 4 and `inf`, and keeps its 1.6.0
+  messages for `n = 2`.
+- Tail amplitudes: `amplitude_general` with `power_tail(s)` on a
+  Lorentzian line against its closed form without passing `C` (measured
+  7.6e-15 at `s = 1.1`, against 2.5e-6 in 1.6.0); the tail amplitude of
+  ten coupling averages against closed forms (a sine, a Gamma function, a
+  Beta function, `a/(a - s0)`) to 1e-13, and against `W(v) v^s` at
+  `v = 1e20` within ten times the expected correction `X^-|a - s0|`.
+- The offset: refitting data with every coupling shifted by `d` shifts
+  `chi_c` by `d` (measured 5.7e-13 relative), leaves `beta` unchanged
+  (7.4e-9) and scales `A` by `((chi_c + d)/chi_c)^beta` (5.5e-8);
+  `with_calibration(chi_offset=...)` adds in quadrature to 1e-12.
+- `BimodalDistribution`: `sf` and `cdf` against `(erfc((x-a)/(w sqrt 2))
+  + erfc((x+a)/(w sqrt 2)))/4` at 30 digits, out to 37 widths, to 3e-13
+  (measured 1.1e-13, SciPy's own normal tail there); `ppf` round trips
+  down to `q = 1e-300` (measured 7.2e-14); a Kolmogorov-Smirnov test on
+  20000 seeded samples accepts it (`p = 0.98`) and rejects a single
+  normal of the same variance. Its class tables reproduce the locking
+  integral against the Faddeeva closed form within 5e-5 (measured 6.8e-7
+  to 2.2e-5), and mean-field dynamics settles on the exact branch within
+  5e-3: at twice the threshold for peaks one width apart (measured
+  3.2e-5), and on the upper branch of the fold for peaks four widths
+  apart at `chiN = 4.5` and 7 (measured 1.6e-3 and 3e-5).
+- The Voigt density at its center for width ratios
+  `fwhm_lorentz/fwhm_gauss` of 1e6, 1e8 and 1e10 against a 120-digit
+  evaluation (1e-14; measured 1.1e-16).
+- The new refusals of `class_table`, `build_system` and
+  `symmetric_exact`.
+
 **The exponent rule** (25 digits, Gaussian line, `Omega` down to 1e-6)
 
 - `beta = 1/(s-1)` or 1/2 for the kernel family with `s` = 1.5, 1.8,
@@ -1351,7 +1679,7 @@ simulation)
   and `sigma_A` from `plan_fit` do not depend on `beta` and
   `sigma_chi_c` scales as `1/beta` (to 1e-12).
 
-**Dynamics and discretisation**
+**Dynamics and discretization**
 
 - Cumulant solver, all detunings equal, against the exact result:
   `xi^2` within 0.2, 0.015 and 0.0015 for 50, 200 and 1000 emitters
@@ -1370,6 +1698,51 @@ simulation)
   and stays below 0.05 at 0.6 times the threshold.
 
 ## Corrections in earlier versions
+
+**1.7.0 fixed five errors and one wrong statement.** Numbers are at
+mpmath's default 15 digits unless stated.
+
+- `c_coefficient`, and so `amplitude`, left out the first 1e-20 line
+  widths of its integral, so it was good to about 20 digits however high
+  the precision: at 40 digits `amplitude(lorentzian())` was
+  `1 + 1.3e-20`. The piece is now added in closed form (example 15).
+- `G_of_Omega` far above the line width integrated part of its range on
+  a linear scale across many decades, against an absolute error estimate
+  while `G` falls like `1/Omega`. On a Lorentzian line of FWHM 1 with the
+  conservative kernel it was 3.2e-10 (relative) off at `Omega = 1e12` and
+  2.3 % off at `1e15`; with the Kuramoto kernel 1.3e-8 at `1e12`. It now
+  keeps the working precision (example 15). For `Omega` up to the line
+  width nothing changes.
+- The Voigt density set its guard digits from the real part of its
+  complex argument only. Near the center of a line whose Lorentzian part
+  is much wider than its Gaussian part it lost digits: `p(0)` was 5.5e-11
+  (relative) off for `fwhm_lorentz/fwhm_gauss = 1e8` and 1.9e-7 for
+  `1e10`. The guard now counts the imaginary part too.
+- `amplitude_general` without `C` read the tail amplitude off the kernel
+  at `|u| = 10^6`, low by a relative `10^(-6 s)` for `power_tail(s)`:
+  `A` was 2.5e-6 off at `s = 1.1` and 2.0e-9 at `s = 1.5`. It now uses
+  the kernel's exact `C` (example 17), and coupling averages that used to
+  be refused as "not converged" get their amplitude.
+- `class_table`, `build_system` and `symmetric_exact` took inputs that
+  gave silent nonsense. `class_table(lorentzian(1.0), M_tail=0)` dropped
+  the 10.5 % of the population beyond 3 widths and renormalized the
+  rest, so its center was 12 % too dense; a negative `core_edge` reversed
+  the core classes and dropped the tail; `build_system` with a negative
+  `N` gave negative populations; `symmetric_exact(2.5, ...)` gave a
+  contrast of 1.015, above its maximum of 1. All are now refused.
+- The Limits section said that an offset in the couplings "changes
+  `eps` and so the exponent". It changes `eps` only by a constant
+  factor, which the amplitude takes up, and the exponent not at all; the
+  fitted threshold moves by the offset (example 18).
+
+All 222 earlier tests pass, with three changes: the version check now
+expects 1.7.0; `test_general_amplitude_tail_amplitude_check` now checks
+the "not converged" refusal on a copy of the kernel without its
+`tail_amplitude`, and also that the kernel with it gives the amplitude of
+the closed-form `C`; and `test_voigt_refusals` checks the refusal of
+`cdf` on a line built without a distribution instead of on
+`bimodal_gaussian`, which has one now. Examples 1 to 14 print the same
+as with 1.6.0.
 
 **1.6.0 fixed three errors.** Numbers are at mpmath's default 15
 digits.
@@ -1530,7 +1903,7 @@ mpmath's default 15 digits unless stated.
 
 **1.1.1 fixed the amplitude at ordinary precision.**
 `c_coefficient` (and so `amplitude`) lost about 40 digits to a
-cancellation near the centre of the line. At mpmath's default 15
+cancellation near the center of the line. At mpmath's default 15
 digits, `amplitude(lorentzian())` returned about 0.0005 instead of 1;
 at 20 digits it was off by about 0.16 %; a Lorentzian 1000 wide lost
 digits even at 30. The tests ran at 30 digits with a unit-width line
@@ -1545,7 +1918,7 @@ CI did not run Python 3.10. The full history is in
 
 ## Limits
 
-- The power law `R ~ eps^beta` is the leading behaviour near the
+- The power law `R ~ eps^beta` is the leading behavior near the
   onset. Data taken far above it bend away and bias `beta`. The
   one-decade rule and the residuals guard the fit, not your choice of
   range.
@@ -1555,11 +1928,15 @@ CI did not run Python 3.10. The full history is in
   carries logarithmic corrections.
 - The rule `beta = 1/2` for `s >= 3` (and `predicted_beta`,
   `kernel_tail_from_beta`, `amplitude_curvature`) assumes a line with a
-  rounded top, `p''(0) < 0`. On a line that is flat at the centre, as
+  rounded top, `p''(0) < 0`. On a line that is flat at the center, as
   `box` is, a tail gives `beta = 1/(s-1)` for every `s > 1`, and a
-  kernel without a tail gives a jump. A measured `beta` below 1/2 is
-  refused by `kernel_tail_from_beta`, although a flat-topped line can
-  produce one.
+  kernel without a tail gives a jump. Since 1.7.0 `predicted_beta` and
+  `kernel_tail_from_beta` take the shape of the top as `center_order`
+  (example 16), but the package does not find it from the line: you give
+  it. `amplitude_curvature` still covers only the rounded top; there is
+  no amplitude for `beta = 1/n` with `n` other than 2. A line whose top
+  is not a single power of `|delta|` (a top that is rounded only very
+  slightly) has a crossover that the rule does not describe.
 - `plan_fit` gives the asymptotic error bars, exact to first order in
   the noise. They were checked against simulated fits at 1 % scatter;
   at much larger scatter the real fit can do worse.
@@ -1568,10 +1945,10 @@ CI did not run Python 3.10. The full history is in
   trusting a long run. The time-averaged kernel is an assumption,
   checked against the full dynamics (the mean-field tests above), not
   a theorem.
-- `c_coefficient` and `amplitude` are good to about 20 significant
-  digits at most, however high `mp.dps` is set: the integral leaves
-  out the first 1e-20 line widths next to the centre, a piece of
-  relative size about 1e-20.
+- `c_coefficient` and `amplitude` are good to about 60 significant
+  digits at most, however high `mp.dps` is set (20 before 1.7.0): the
+  first 1e-20 line widths next to the center are added in closed form to
+  leading order, which leaves out a piece of relative size about 1e-60.
 - `fold_interval` finds a fold only if its grid shows it: structure
   below `Omega = 10^lo` or narrower than the grid spacing is missed, and
   with several folds only the first and last turning points are used.
@@ -1583,12 +1960,23 @@ CI did not run Python 3.10. The full history is in
   with 1000 seeded fits held to within 6 % up to three tenths. It is
   refused above a quarter.
 - `with_calibration` treats calibration as one scale factor for all
-  couplings and one for all `R`. An offset (a zero error) is not a
-  scale: it changes `eps` and so the exponent, and is not covered.
-- The default tail amplitude of `amplitude_general` is read off the
-  kernel at `|u| = 10^6`; for `power_tail(s)` it is low by a relative
-  `10^(-6 s)`, which the power `1/(s-1)` multiplies (2.5e-6 in `A` for
-  `s = 1.1`). Pass `C` for more digits.
+  couplings, one for all `R` and (since 1.7.0) one offset for all
+  couplings, each to first order and independent of the others. A
+  calibration error that differs from point to point is not a
+  calibration: give it as `sigma_chi` or `sigma_r`. An offset in `R` (a
+  background) is not covered: it changes the shape of `R(eps)`. Before
+  1.7.0 this section said that a coupling offset changes the exponent; it
+  does not (example 18). `fit_exact_branch` has no offset parameter: there
+  the threshold is fixed by the model, so an offset of the couplings
+  changes the fit.
+- For a kernel you build yourself, without `tail_amplitude`, the default
+  tail amplitude of `amplitude_general` is still read off the kernel at
+  `|u| = 10^6` (for `power_tail(s)` this was low by a relative
+  `10^(-6 s)`, which the power `1/(s-1)` multiplies: 2.5e-6 in `A` for
+  `s = 1.1`). Give the kernel a `tail_amplitude`, or pass `C`. The
+  shipped kernels with a tail carry the exact value since 1.7.0, except
+  a coupling average whose two tails are equal, `(gamma-2)/eta = s0`,
+  which falls like `log|u| |u|^-s` and has no single `C`.
 - Each mpmath density value of `voigt` takes extra digits far out in
   the tail, which makes integrals over a Voigt line several times
   slower than over a Gaussian one. Its floating-point distribution
@@ -1598,7 +1986,9 @@ CI did not run Python 3.10. The full history is in
   distributions of the other lines take milliseconds. Its tail
   probabilities are good to about 1e-13 (relative); `cdf` close to 1 is
   `1 - sf`, which has only absolute precision there, as with SciPy's
-  own distributions.
+  own distributions. The same holds for the distribution of
+  `bimodal_gaussian` (since 1.7.0), which is as good as SciPy's normal
+  tail (1e-13 relative out to 37 widths) and fast.
 - `branch_at_coupling` and `branch_at_eps` assume a continuous onset,
   where `eps` rises with `Omega`; on a folded branch they refuse when
   they meet `eps <= 0`, but where a branch folds above the threshold (an
@@ -1625,12 +2015,17 @@ CI did not run Python 3.10. The full history is in
   `chi - chi_c`, and it is refused above a quarter. Build the table over
   a wider range of `eps` than the data cover, since a best fit at its
   edge is refused.
-- Far above the line width, `G(Omega)` integrates the line's part of
-  the kernel range on a linear scale across many decades and loses
-  digits: on the Lorentzian line at 15 digits it is 1.5e-14 (relative)
-  off for `Omega` from 100 to 1e6 line widths, 3e-13 at 1e9 and 3e-10
-  at 1e12 (at 30 digits, 1e-28 at 1e9 and 2e-25 at 1e12). Near the
-  threshold, where the onset is, it keeps the working precision.
+- Up to 1.6.0, far above the line width, `G(Omega)` lost digits (3e-10
+  at `Omega = 1e12` line widths and 2.3 % at `1e15`, at 15 digits). Since
+  1.7.0 it keeps the working precision there; the tests check it out to
+  `Omega = 1e30` on Lorentzian and Gaussian lines.
+- In the mean-field dynamics of a two-peaked line (example 19) the tests
+  check where the synchronized state settles, started with every spin in
+  phase. They do not check the unsynchronized side of the hysteresis
+  loop, or where the dynamics goes below the lower turning point: at
+  `chiN = 3` the run of example 19 has not settled after 600 time units
+  (over the second half `R` averages 0.35, with a standard deviation of
+  0.18), and the package says nothing about it.
 - `amplitude_curvature` takes `p''(0)` from mpmath's numerical
   derivative, and since 1.6.0 treats a value below `2^(20 - prec)
   p(0)/scale^2` in size as zero (about 1e-10 of `p(0)/scale^2` at 15
@@ -1662,7 +2057,12 @@ fixes the scale of `bimodal_gaussian` and the free classes of
 `tail_integral` treats a line with compact support and how
 `full_exact` builds its operators, and adds `branch_table`; 1.6.0 adds
 the floating-point distribution of `voigt` and new refusals in
-`amplitude_general`, `amplitude_curvature` and `fold_interval`); the
+`amplitude_general`, `amplitude_curvature` and `fold_interval`; 1.7.0
+changes how `G` is integrated far above the line width, how
+`c_coefficient` treats the center of the line and how many guard digits
+the Voigt density takes, and adds the floating-point distribution of
+`bimodal_gaussian`, the kernels' exact tail amplitudes and the input
+checks of `class_table`, `build_system` and `symmetric_exact`); the
 `measured` module and the packaging are new here. Copyright as in [NOTICE](NOTICE).
 
 ## Citing, support and license
