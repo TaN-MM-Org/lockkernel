@@ -1,7 +1,7 @@
 """Inhomogeneous line shapes p(delta).
 
 Each line shape is returned as a `LineShape`: a callable density together with
-the pieces the rest of the package needs, namely the density at the centre,
+the pieces the rest of the package needs, namely the density at the center,
 a cumulative distribution and its inverse for building quadrature classes, and
 a nominal width used to set integration scales.
 
@@ -19,7 +19,8 @@ import numpy as np
 from scipy import stats
 
 __all__ = ["LineShape", "lorentzian", "gaussian", "student_t", "box",
-           "bimodal_gaussian", "voigt", "VoigtDistribution", "LINESHAPES"]
+           "bimodal_gaussian", "voigt", "VoigtDistribution",
+           "BimodalDistribution", "LINESHAPES"]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -59,7 +60,7 @@ class LineShape:
         return self.pdf(delta)
 
     def p0(self):
-        """Density at the line centre."""
+        """Density at the line center."""
         return self.pdf(mp.mpf(0))
 
     def cdf(self, x):
@@ -142,7 +143,10 @@ def bimodal_gaussian(sep: float, width: float = 1.0) -> LineShape:
     p''(0) = (a^2/width^2 - 1) p(0) / width^2 with a = sep/2, so the top
     is rounded for |sep| < 2 width, flat (to fourth order) at |sep| =
     2 width and a dip beyond.  A negative `sep` gives the same
-    line as its absolute value.  (Before 1.4.0 its integration scale,
+    line as its absolute value.  Since 1.7.0 the line has a floating-point
+    distribution (`frozen` is a `BimodalDistribution`), so it can be
+    turned into a class table for the dynamics modules; before, `frozen`
+    was None.  (Before 1.4.0 its integration scale,
     width + sep/2, came out zero or negative for sep <= -2 width, and the
     integrals went wrong: for sep = -4, G(0.1) was twice the value for
     sep = 4 and `branch_point` with the Kuramoto kernel raised TypeError.)
@@ -160,7 +164,85 @@ def bimodal_gaussian(sep: float, width: float = 1.0) -> LineShape:
                     + mp.e ** (-(d + a) ** 2 / (2 * s ** 2)))
 
     return LineShape(f"bimodal{float(sep) / float(width):g}", pdf,
-                     float(width) + abs(float(a)))
+                     float(width) + abs(float(a)),
+                     BimodalDistribution(abs(float(sep)) / 2, float(width)))
+
+
+class BimodalDistribution:
+    """Floating-point distribution of `bimodal_gaussian` (new in 1.7.0).
+
+    Two normal distributions of standard deviation `width`, centered at
+    +a and -a, with weight 1/2 each.  `pdf`, `cdf`, `sf` and `ppf` on
+    floats or arrays, as for a frozen SciPy distribution, so that a
+    two-peaked line can be turned into a class table for the dynamics
+    modules (`lockkernel.ensemble.class_table`).  The upper tail is
+    sf(x) = [S((x - a)/w) + S((x + a)/w)] / 2 with S SciPy's normal
+    survival function, which keeps its relative precision far out;
+    cdf(x) = sf(-x) by symmetry.  ppf inverts sf by Brent's method from
+    the tail that keeps the digits, inside the bracket
+    a + w S^-1(2p) <= x <= a + w S^-1(p): for x >= 0 the second term of sf
+    is at most the first, so sf lies between half the first term and the
+    first term.
+    """
+
+    def __init__(self, a: float, width: float):
+        self.a, self.width = float(a), float(width)
+        if not (np.isfinite(self.a) and self.a >= 0.0):
+            raise ValueError(f"a must be finite and >= 0, got {a!r}")
+        _positive(self.width, "width")
+
+    def pdf(self, x):
+        x = np.asarray(x, dtype=float)
+        out = 0.5 * (stats.norm.pdf(x, self.a, self.width)
+                     + stats.norm.pdf(x, -self.a, self.width))
+        return out[()] if out.ndim == 0 else out
+
+    def sf(self, x):
+        x = np.asarray(x, dtype=float)
+        out = 0.5 * (stats.norm.sf(x, self.a, self.width)
+                     + stats.norm.sf(x, -self.a, self.width))
+        return out[()] if out.ndim == 0 else out
+
+    def cdf(self, x):
+        return self.sf(-np.asarray(x, dtype=float))
+
+    def _isf_small(self, p: float) -> float:
+        """The x >= 0 with sf(x) = p, for 0 < p <= 1/2."""
+        from scipy.optimize import brentq
+        if p == 0.5:
+            return 0.0
+        a, w = self.a, self.width
+        f = lambda x: float(self.sf(x)) - p
+        lo = max(0.0, a + w * float(stats.norm.isf(min(2.0 * p, 1.0))))
+        hi = a + w * float(stats.norm.isf(p))
+        if not np.isfinite(hi):
+            return np.inf
+        # the bracket holds exactly; rounding in isf can put an end a
+        # hair on the wrong side, so it is checked and widened
+        if f(lo) < 0.0:
+            lo = 0.0
+        while f(hi) > 0.0:
+            hi = 2.0 * hi + w
+        if f(hi) == 0.0:
+            return hi
+        return brentq(f, lo, hi, xtol=1e-300,
+                      rtol=4 * np.finfo(float).eps, maxiter=200)
+
+    def _ppf1(self, q: float) -> float:
+        if not 0.0 <= q <= 1.0:
+            return np.nan
+        if q == 0.0:
+            return -np.inf
+        if q == 1.0:
+            return np.inf
+        if q < 0.5:
+            return -self._isf_small(q)
+        return self._isf_small(1.0 - q)
+
+    def ppf(self, q):
+        a = np.asarray(q, dtype=float)
+        out = np.vectorize(self._ppf1, otypes=[float])(a)
+        return out[()] if out.ndim == 0 else out
 
 
 class VoigtDistribution:
@@ -310,8 +392,13 @@ def voigt(fwhm_gauss: float = 1.0, fwhm_lorentz: float = 1.0) -> LineShape:
 
     def pdf(d):
         d = mp.mpf(d)
-        # |Re z| = |d| / (sigma sqrt 2) = 2 sqrt(ln 2) |d| / fwhm_gauss
-        guard = 10 + int(2 * mp.log10(1 + 2 * abs(d) / fg))
+        # |Re z| = |d| / (sigma sqrt 2) = 2 sqrt(ln 2) |d| / fwhm_gauss and
+        # |Im z| = sqrt(ln 2) fwhm_lorentz / fwhm_gauss; about 2 log10|z|
+        # digits cancel.  (Before 1.7.0 only |Re z| set the guard, and near
+        # the center of a line with fwhm_lorentz >> fwhm_gauss the density
+        # lost digits: 5e-11 (relative) at d = 0 for a width ratio 1e8, at
+        # 15 digits.)
+        guard = 10 + int(2 * mp.log10(1 + (2 * abs(d) + fl) / fg))
         with mp.extradps(guard):
             sig = fg / (2 * mp.sqrt(2 * mp.log(2)))
             r2 = sig * mp.sqrt(2)
@@ -337,5 +424,5 @@ LINESHAPES = {
 
 
 def float_pdf(line: LineShape):
-    """A vectorised float precision version of a line shape density."""
+    """A vectorized float precision version of a line shape density."""
     return np.vectorize(lambda x: float(line.pdf(mp.mpf(float(x)))))

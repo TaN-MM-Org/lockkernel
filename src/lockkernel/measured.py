@@ -40,7 +40,9 @@ weights settle) and refused where first order is not enough.  And
 `with_calibration` adds the uncertainty of an overall calibration SCALE of
 the couplings or of R to the error bars: such a scale moves chi_c or A
 and, exactly, nothing else (eps = chi/chi_c - 1 does not change when every
-chi and chi_c are scaled together), so beta is immune to both.  With
+chi and chi_c are scaled together), so beta is immune to both.  Since
+1.7.0 it also takes an offset common to all couplings, which moves chi_c
+by the offset and A by a constant factor, and leaves beta alone as well.  With
 `sigma_r` given, every fit also reports chi^2, its degrees of freedom and
 the p-value, a check of whether the data are consistent with the power law
 at the stated noise.
@@ -116,6 +118,9 @@ class BranchFit:
     is nothing to test); sigma_chi_used, True when coupling errors were
     propagated; calibration_rel, the relative calibration-scale errors
     (of chi, of R) folded in by `with_calibration`.
+
+    Added in 1.7.0 (default 0): calibration_offset, the absolute error of a
+    coupling offset folded in by `with_calibration`.
     """
     chi_c: float
     beta: float
@@ -132,6 +137,7 @@ class BranchFit:
     p_value: Optional[float] = None
     sigma_chi_used: bool = False
     calibration_rel: Tuple[float, float] = (0.0, 0.0)
+    calibration_offset: float = 0.0
 
 
 def _check_reference(reference: str) -> None:
@@ -350,53 +356,80 @@ def fit_branch(chi: ArrayLike, r: ArrayLike, reference: str,
 
 
 def with_calibration(fit: BranchFit, chi_scale_rel: float = 0.0,
-                     r_scale_rel: float = 0.0) -> BranchFit:
-    """Add calibration-scale uncertainties to a fit's error bars.
+                     r_scale_rel: float = 0.0,
+                     chi_offset: float = 0.0) -> BranchFit:
+    """Add calibration uncertainties to a fit's error bars.
 
     chi_scale_rel : relative 1-sigma uncertainty of an overall scale
         factor common to all couplings (for example the conversion of a
         pump power or a field into chiN).
     r_scale_rel : the same for the order parameter R (for example a
         detection efficiency or a contrast normalization).
+    chi_offset : absolute 1-sigma uncertainty of an offset common to all
+        couplings, in the units of chi (new in 1.7.0; for example the zero
+        of a power meter or a field probe).
 
     Scaling every coupling by k leaves eps = chi/chi_c - 1 unchanged when
     chi_c scales by k as well, so the fitted chi_c scales by k and beta
     and A do not change at all; scaling every R by k scales A by k and
-    changes nothing else.  These are exact properties of the fitted law
-    (checked in the tests by refitting scaled data).  So the calibration
-    uncertainties are added in quadrature,
+    changes nothing else.  Shifting every coupling by d leaves
+    chi - chi_c unchanged when chi_c shifts by d as well, so the fitted
+    chi_c shifts by d, eps changes by the constant factor
+    chi_c / (chi_c + d), which A absorbs (A changes by the factor
+    ((chi_c + d)/chi_c)^beta), and beta does not change at all.  These
+    are exact properties of the fitted law (checked in the tests by
+    refitting scaled and shifted data).  So the calibration
+    uncertainties are added in quadrature, to first order,
 
-        sigma_chi_c -> sqrt(sigma_chi_c^2 + (chi_c chi_scale_rel)^2),
-        sigma_A     -> sqrt(sigma_A^2 + (A r_scale_rel)^2),
+        sigma_chi_c -> sqrt(sigma_chi_c^2 + (chi_c chi_scale_rel)^2
+                            + chi_offset^2),
+        sigma_A     -> sqrt(sigma_A^2 + (A r_scale_rel)^2
+                            + (A beta chi_offset / chi_c)^2),
 
-    and sigma_beta is returned unchanged: the exponent is immune to both
-    scale calibrations.  Returns a new `BranchFit` that records the
-    values in `calibration_rel`.  Refuses negative or non-finite values,
-    and a fit that already has a calibration folded in (it would be
-    counted twice).
+    and sigma_beta is returned unchanged: the exponent is immune to all
+    three.  Returns a new `BranchFit` that records the values in
+    `calibration_rel` and `calibration_offset`.  Refuses negative or
+    non-finite values, and a fit that already has a calibration folded in
+    (it would be counted twice).  (Before 1.7.0 the README said that an
+    offset changes the exponent; it does not, because the fitted
+    threshold takes it up.)
     """
     if not isinstance(fit, BranchFit):
         raise TypeError("with_calibration needs a BranchFit from fit_branch")
-    cx, cr = float(chi_scale_rel), float(r_scale_rel)
+    cx, cr, co = float(chi_scale_rel), float(r_scale_rel), float(chi_offset)
     if not (np.isfinite(cx) and np.isfinite(cr) and cx >= 0.0
             and cr >= 0.0):
         raise ValueError("chi_scale_rel and r_scale_rel must be finite "
                          "and >= 0")
-    if tuple(fit.calibration_rel) != (0.0, 0.0):
+    if not (np.isfinite(co) and co >= 0.0):
+        raise ValueError("chi_offset must be finite and >= 0")
+    if tuple(fit.calibration_rel) != (0.0, 0.0) \
+            or fit.calibration_offset != 0.0:
         raise ValueError(
             f"this fit already includes calibration errors "
-            f"{fit.calibration_rel}; apply with_calibration once, to the "
-            "fit returned by fit_branch")
+            f"{fit.calibration_rel}"
+            + (f" and an offset error {fit.calibration_offset:g}"
+               if fit.calibration_offset != 0.0 else "")
+            + "; apply with_calibration once, to the fit returned by "
+            "fit_branch")
+    if co == 0.0:
+        # exactly the 1.3.0 arithmetic when no offset is given
+        s_chi = float(np.hypot(fit.sigma_chi_c, fit.chi_c * cx))
+        s_amp = float(np.hypot(fit.sigma_amplitude, fit.amplitude * cr))
+    else:
+        s_chi = float(np.sqrt(fit.sigma_chi_c ** 2 + (fit.chi_c * cx) ** 2
+                              + co ** 2))
+        s_amp = float(fit.amplitude * np.sqrt(
+            (fit.sigma_amplitude / fit.amplitude) ** 2 + cr ** 2
+            + (fit.beta * co / fit.chi_c) ** 2))
     return dataclasses.replace(
-        fit,
-        sigma_chi_c=float(np.hypot(fit.sigma_chi_c, fit.chi_c * cx)),
-        sigma_amplitude=float(np.hypot(fit.sigma_amplitude,
-                                       fit.amplitude * cr)),
-        calibration_rel=(cx, cr))
+        fit, sigma_chi_c=s_chi, sigma_amplitude=s_amp,
+        calibration_rel=(cx, cr), calibration_offset=co)
 
 
 def kernel_tail_from_beta(beta: float, sigma_beta: float = 0.0,
-                          n_sigma: float = 2.0) -> Tuple[float, float]:
+                          n_sigma: float = 2.0,
+                          center_order: float = 2.0) -> Tuple[float, float]:
     """The kernel tail exponent s from a measured beta: s = 1 + 1/beta.
 
     Error propagation: sigma_s = sigma_beta / beta^2.
@@ -406,11 +439,19 @@ def kernel_tail_from_beta(beta: float, sigma_beta: float = 0.0,
     support, Gaussian, any decay faster than |u|^-3) produces
     beta = 1/2, so the measurement identifies only the class.  Also
     refuses beta significantly BELOW 1/2, which no locking kernel
-    produces on a line with a rounded maximum at its centre -- usually
-    a sign the fitted range left the near-threshold regime.  (A line
-    that is flat at its centre, such as a box, does give
-    beta = 1/(s-1) < 1/2 for a tail s > 3; this function assumes a
-    rounded line and does not cover that case.)
+    produces on a line with a rounded maximum at its center -- usually
+    a sign the fitted range left the near-threshold regime.
+
+    center_order (new in 1.7.0) is for a line whose top is not rounded:
+    the power n in p(0) - p(delta) ~ c |delta|^n at the center, as in
+    `lockkernel.kernels.predicted_beta` (2, the default, for a rounded
+    top; 4 for two Gaussian peaks exactly two widths apart; math.inf for
+    a line flat around its center, such as a box).  Then beta = 1/(s-1)
+    for 1 < s < n+1 and 1/n beyond, so the class value 1/2 above becomes
+    1/n.  On a flat top every beta > 0 names a tail, s = 1 + 1/beta; a
+    beta consistent with 0 (an order parameter that jumps) is refused.
+    Before 1.7.0 a beta below 1/2 from a flat-topped line was refused
+    with no way round it.
     """
     b = float(beta)
     sb = abs(float(sigma_beta))
@@ -420,23 +461,36 @@ def kernel_tail_from_beta(beta: float, sigma_beta: float = 0.0,
         raise ValueError("sigma_beta must be finite")
     if not (np.isfinite(float(n_sigma)) and float(n_sigma) >= 0.0):
         raise ValueError("n_sigma must be finite and >= 0")
-    if b + n_sigma * sb < 0.5:
+    from .kernels import _center_order
+    n = _center_order(center_order)
+    if n == np.inf:
+        if b - n_sigma * sb <= 0.0:
+            raise ValueError(
+                f"beta = {b:.4g} +- {sb:.4g} is consistent with 0: on a "
+                "flat-topped line that means a jump at the threshold (a "
+                "kernel without an algebraic tail), and no tail exponent "
+                "can be named from it")
+        return 1.0 + 1.0 / b, sb / b ** 2
+    cls = 1.0 / n
+    line_kind = ("a rounded center" if n == 2.0 else
+                 f"p(0) - p(delta) ~ |delta|^{n:g} at its center")
+    if b + n_sigma * sb < cls:
         raise ValueError(
             f"beta = {b:.4g} +- {sb:.4g} lies significantly below "
-            "1/2, which no locking kernel produces in the dictionary "
-            "beta = 1/(s-1) (1 < s < 3), 1/2 (s >= 3) of a line with "
-            "a rounded centre. The fitted range has likely left the "
-            "near-threshold regime; refit closer to the onset")
-    if b - n_sigma * sb <= 0.5:
+            f"1/{n:g}, which no locking kernel produces in the dictionary "
+            f"beta = 1/(s-1) (1 < s < {n + 1:g}), 1/{n:g} (s >= {n + 1:g}) "
+            f"of a line with {line_kind}. The fitted range has likely left "
+            "the near-threshold regime; refit closer to the onset")
+    if b - n_sigma * sb <= cls:
         raise ValueError(
-            f"beta = {b:.4g} +- {sb:.4g} is consistent with 1/2, "
-            "which identifies only the CLASS s >= 3 (compact support "
-            "or decay faster than |u|^-3); no single tail exponent "
-            "can be named from it")
+            f"beta = {b:.4g} +- {sb:.4g} is consistent with 1/{n:g}, "
+            f"which identifies only the CLASS s >= {n + 1:g} (compact "
+            f"support or decay faster than |u|^-{n + 1:g}); no single tail "
+            "exponent can be named from it")
     s = 1.0 + 1.0 / b
-    if s <= 1.0 or s >= 3.0:
+    if s <= 1.0 or s >= n + 1:
         raise ValueError(f"implied s = {s:.4g} outside the algebraic "
-                         "window 1 < s < 3")
+                         f"window 1 < s < {n + 1:g}")
     return s, sb / b ** 2
 
 

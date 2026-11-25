@@ -2,7 +2,7 @@
 
 A locking kernel W(u) is the time averaged projection of an oscillator on the
 mean field, as a function of the detuning measured in units of the locking
-bandwidth, u = delta / Omega.  It is normalised so that a resonant oscillator
+bandwidth, u = delta / Omega.  It is normalized so that a resonant oscillator
 follows the field perfectly, W(0) = 1, and it is even.
 
 Two kernels matter physically.
@@ -31,6 +31,7 @@ is what the universality line is tested against.
 from __future__ import annotations
 
 import dataclasses
+import math
 from typing import Callable, Optional
 
 import mpmath as mp
@@ -59,6 +60,13 @@ class Kernel:
         empty by default, which leaves every integral as before).  The
         coupling average of a compactly supported kernel has one, see
         `heterogeneous`.
+    tail_amplitude : callable or None
+        For a kernel with an algebraic tail, a function of no arguments
+        that returns the exact tail amplitude C in W ~ C |u|^-s, at the
+        current mpmath precision (new in 1.7.0; None when it is not
+        known).  `lockkernel.parametric.amplitude_general` uses it when
+        no C is passed.  It is 1 for `conservative` and `power_tail`, and
+        `heterogeneous` gives it in closed form or as one integral.
     """
 
     name: str
@@ -66,6 +74,7 @@ class Kernel:
     tail: float = None
     support: float = None
     breaks: tuple = ()
+    tail_amplitude: Optional[Callable] = None
 
     def __call__(self, u):
         return self.W(u)
@@ -147,7 +156,8 @@ def _algebraic_quad(f, s, X=1000, breaks=()):
 
 def conservative() -> Kernel:
     """The conservative spin kernel, W = 1/(1+u^2), mass pi."""
-    return Kernel("conservative", lambda u: 1 / (1 + mp.mpf(u) ** 2), tail=2.0)
+    return Kernel("conservative", lambda u: 1 / (1 + mp.mpf(u) ** 2), tail=2.0,
+                  tail_amplitude=lambda: mp.mpf(1))
 
 
 def kuramoto() -> Kernel:
@@ -171,7 +181,8 @@ def power_tail(s: float) -> Kernel:
     def W(u):
         return 1 / (1 + abs(mp.mpf(u)) ** s)
 
-    return Kernel(f"power{float(s):g}", W, tail=float(s))
+    return Kernel(f"power{float(s):g}", W, tail=float(s),
+                  tail_amplitude=lambda: mp.mpf(1))
 
 
 def gaussian_kernel() -> Kernel:
@@ -187,7 +198,7 @@ KERNELS = {
 }
 
 
-def predicted_beta(s: Optional[float]) -> float:
+def predicted_beta(s: Optional[float], center_order: float = 2.0) -> float:
     """The order parameter exponent predicted for a kernel of tail exponent s.
 
     beta = 1/(s-1) for 1 < s < 3, and beta = 1/2 for s >= 3 or for a kernel
@@ -196,27 +207,64 @@ def predicted_beta(s: Optional[float]) -> float:
     converging, so that the leading correction to the self consistency changes
     from being set by the tail to being set by the curvature of the line.
 
-    The value 1/2 assumes the line has a rounded maximum at its centre,
+    The value 1/2 assumes the line has a rounded maximum at its center,
     p''(0) < 0 (every shipped line except `box`, and `bimodal_gaussian`
     with its peaks two or more widths apart, sep >= 2 width, which has a
-    dip or, at sep = 2 width, a flat top).  On a line that is flat
-    at the centre, such as `box`, there is no curvature term: a tail gives
-    beta = 1/(s-1) for every s > 1 (so beta < 1/2 for s > 3), and a
-    compactly supported kernel gives no power law at all (the order
-    parameter jumps).  This function does not cover that case.
+    dip or, at sep = 2 width, a flat top).
+
+    center_order (new in 1.7.0) covers other line tops.  It is the power n
+    in p(0) - p(delta) ~ c |delta|^n at the center (c > 0): 2 for a rounded
+    top (the default, and the rule above), 4 for `bimodal_gaussian` with
+    its peaks exactly two widths apart (p(0) - p(delta) = p(0) delta^4 /
+    (12 width^4) to leading order), and math.inf for a line that is flat
+    on an interval around its center, such as `box`.  The same argument
+    as for n = 2 gives
+
+        beta = 1/(s-1)  for 1 < s < n+1,     beta = 1/n  for s >= n+1,
+
+    because G(0) - G(Omega) = int [p(0) - p(Omega u)] W(u) du is led by
+    the kernel's tail, C I_s Omega^(s-1), when the integral I_s of
+    `lockkernel.parametric.tail_integral` converges at the center
+    (s < n+1), and otherwise by the center of the line, c M_n Omega^n with
+    M_n = int |u|^n W(u) du.  On a flat top a tail gives beta = 1/(s-1)
+    for every s > 1, and a kernel without a tail gives no power law at all
+    (the order parameter jumps at the threshold), which is refused.  The
+    tests check n = 1, 4 and inf against the exact branch.
 
     Refuses s <= 1 (and a non-finite s other than +inf): no kernel with a
-    finite mass has such a tail.
+    finite mass has such a tail.  Refuses a center_order that is not
+    positive (or is NaN).
     """
-    if s is None:
-        return 0.5
-    s = float(s)
-    if s != s or s <= 1.0:
-        raise ValueError(f"tail exponent s = {s:g}: a kernel with a finite "
-                         "mass needs s > 1 (or None for no algebraic tail)")
-    if s >= 3:
-        return 0.5
+    n = _center_order(center_order)
+    if s is not None:
+        s = float(s)
+        if s != s or s <= 1.0:
+            raise ValueError(f"tail exponent s = {s:g}: a kernel with a "
+                             "finite mass needs s > 1 (or None for no "
+                             "algebraic tail)")
+    if s is None or s == math.inf:
+        if n == math.inf:
+            raise ValueError(
+                "on a line that is flat around its center a kernel without "
+                "an algebraic tail gives no power law: the order parameter "
+                "jumps at the threshold")
+        return 1.0 / n
+    if s >= n + 1:
+        return 1.0 / n
     return 1.0 / (s - 1.0)
+
+
+def _center_order(center_order) -> float:
+    """center_order as a float > 0 (math.inf allowed); refuses the rest."""
+    try:
+        n = float(center_order)
+    except (TypeError, ValueError):
+        raise ValueError(f"center_order must be a number > 0 (or math.inf "
+                         f"for a flat top), got {center_order!r}")
+    if not n > 0:
+        raise ValueError(f"center_order must be > 0 (or math.inf for a flat "
+                         f"top), got {center_order!r}")
+    return n
 
 
 def heterogeneous(base: Kernel, degree_exponent: float, eta: float = 1.0,
@@ -317,8 +365,14 @@ def heterogeneous(base: Kernel, degree_exponent: float, eta: float = 1.0,
             W = lambda u: Wt(u) / W0
         else:
             W = lambda u: Wt(mp.mpf(u) / kmin ** eta) / W0
+        # above v = 1 the average is exactly C v^-s with, from the Beta
+        # function above, C = (s/2) B(s/2, 3/2), s = (gamma-2)/eta; k_min
+        # rescales v, so C gains the factor k_min^(eta s)
+        sk = (g - 2) / eta
+        C = lambda: sk / 2 * mp.beta(sk / 2, mp.mpf(3) / 2) * kmin ** (eta * sk)
     else:
         W = _coupling_average(base, (g - 2) / eta, tail, kmin ** eta)
+        C = _average_tail_amplitude(base, (g - 2) / eta, kmin ** eta)
     # a compactly supported base leaves a kink where its support edge
     # meets the smallest weight, at v = support k_min^eta
     breaks = ()
@@ -327,7 +381,48 @@ def heterogeneous(base: Kernel, degree_exponent: float, eta: float = 1.0,
         if kink != 1:           # u = 1 is a break point everywhere already
             breaks = (float(kink),)
     return Kernel(f"het_{base.name}_g{float(g):g}_e{float(eta):g}",
-                  W, tail=float(tail), breaks=breaks)
+                  W, tail=float(tail), breaks=breaks, tail_amplitude=C)
+
+
+def _average_tail_amplitude(base: Kernel, a, v_unit):
+    """The tail amplitude C of the coupling average of `base` (new in 1.7.0).
+
+    With Wt(v) = a X^-a int_0^X x^(a-1) W(x) dx and X = |v| / v_unit (see
+    `heterogeneous`):
+
+    * a < s0 (the coupling spread sets the tail, s = a): the integral
+      converges as X grows, so Wt ~ C |v|^-a with
+      C = a v_unit^a int_0^inf x^(a-1) W(x) dx;
+    * a > s0 (the base kernel's tail W ~ C0 x^-s0 sets it, s = s0): the
+      integral grows like C0 X^(a-s0) / (a-s0), so C = a C0 v_unit^s0 /
+      (a - s0), which needs the base's own C0;
+    * a = s0: Wt ~ a C0 log(X) X^-a, not a pure power, so there is no C.
+
+    Returns a function of no arguments (evaluated at the precision in force
+    when it is called), or None when C is not known.  The approach to the
+    tail is slow when a and s0 are close (the relative correction is of
+    order X^-|a - s0|), which is why the value read off the kernel at
+    |v| = 10^6 is not good enough there.
+    """
+    a = mp.mpf(a)
+    v_unit = mp.mpf(v_unit)
+    s0 = mp.mpf(base.tail) if base.tail is not None else mp.inf
+    if a < s0:
+        def C():
+            f = lambda x: x ** (a - 1) * base.W(x)
+            if base.support is not None:
+                J = mp.quad(f, _with_breaks([0, base.support], base.breaks))
+            elif base.tail is not None:
+                # f ~ C0 x^-(s0 - a + 1), an algebraic tail with exponent > 1
+                J = _algebraic_quad(f, s0 - a + 1, breaks=base.breaks)
+            else:
+                J = mp.quad(f, _with_breaks([0, 1, 10, 100, 1000, mp.inf],
+                                            base.breaks))
+            return a * v_unit ** a * J
+        return C
+    if a > s0 and base.tail_amplitude is not None:
+        return lambda: a * base.tail_amplitude() * v_unit ** s0 / (a - s0)
+    return None
 
 
 def _coupling_average(base: Kernel, a, tail, v_unit):

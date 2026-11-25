@@ -312,7 +312,7 @@ def _cartesian(st: State):
 
 
 def collective_moments(st: State, sys: System):
-    """Mean and symmetrised covariance of J = (1/2) sum_a sigma_a."""
+    """Mean and symmetrized covariance of J = (1/2) sum_a sigma_a."""
     n = sys.n
     v, C = _cartesian(st)
     J = 0.5 * (n @ v)

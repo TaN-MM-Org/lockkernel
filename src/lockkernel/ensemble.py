@@ -1,11 +1,11 @@
-"""Discretisation of a line into detuning classes.
+"""Discretization of a line into detuning classes.
 
 The dynamics is solved class by class, so a continuous line has to be replaced
 by a finite set of detunings carrying the right populations.  Two features of
 the problem dictate the construction.
 
 * The line can have ALGEBRAIC TAILS.  A uniform grid, or a grid truncated at a
-  few widths, changes the density at the centre once it is renormalised, and
+  few widths, changes the density at the center once it is renormalized, and
   the threshold depends on that density directly.  The construction below
   therefore keeps the entire population: nothing is discarded.
 
@@ -53,16 +53,59 @@ def _log_bins(dist, lo, hi, M, lump_last):
     return np.array(nodes), np.array(mass)
 
 
+def _whole(value, what: str) -> int:
+    """A whole number >= 1 (since 1.7.0 checked: 0 tail classes silently
+    dropped the tail, and 0 core classes raised ZeroDivisionError)."""
+    if isinstance(value, bool) or not isinstance(value, (int, np.integer)) \
+            or value < 1:
+        raise ValueError(f"{what} must be a whole number >= 1, got {value!r}")
+    return int(value)
+
+
+def _positive_float(value, what: str) -> float:
+    v = float(value)
+    if not (np.isfinite(v) and v > 0.0):
+        raise ValueError(f"{what} must be finite and positive, got {value!r}")
+    return v
+
+
 def class_table(line: LineShape, M_core: int = 64, M_tail: int = 14,
                 M_spec: int = 8, core_edge: float = None,
                 free_beyond: float = None, delta_max: float = None):
-    """Return (delta, n, spec_delta, spec_n) with populations summing to one."""
+    """Return (delta, n, spec_delta, spec_n) with populations summing to one.
+
+    M_core, M_tail and M_spec are the numbers of core classes, of tail
+    classes on each side and of free classes on each side; core_edge,
+    free_beyond and delta_max the edges of the regions (see the module
+    docstring; defaults 3 and 1000 line widths, and no free classes).
+
+    Since 1.7.0 the inputs are checked: the counts must be whole numbers
+    >= 1, the edges finite and positive, and delta_max beyond core_edge
+    when there are no free classes.  Before, M_tail = 0 dropped the tail
+    population and renormalized the rest (for a Lorentzian line of FWHM 1,
+    10.5 % of the population, so the class table's center was 12 % too
+    dense), a negative core_edge gave the core classes in reverse order
+    and no tail, and delta_max below core_edge gave tail classes inside
+    the core.
+    """
     dist = line.frozen
     if dist is None:
-        raise ValueError(f"{line.name} has no float distribution to discretise")
+        raise ValueError(f"{line.name} has no float distribution to discretize")
+    M_core = _whole(M_core, "M_core")
+    M_tail = _whole(M_tail, "M_tail")
     scale = float(line.scale)
-    core_edge = 3.0 * scale if core_edge is None else float(core_edge)
-    delta_max = 1000.0 * scale if delta_max is None else float(delta_max)
+    core_edge = 3.0 * scale if core_edge is None \
+        else _positive_float(core_edge, "core_edge")
+    delta_max = 1000.0 * scale if delta_max is None \
+        else _positive_float(delta_max, "delta_max")
+    if free_beyond is None:
+        if not delta_max > core_edge:
+            raise ValueError(
+                f"delta_max = {delta_max:g} must lie beyond core_edge = "
+                f"{core_edge:g}: the tail classes run between them")
+    else:
+        free_beyond = _positive_float(free_beyond, "free_beyond")
+        M_spec = _whole(M_spec, "M_spec")
     tail_end = delta_max if free_beyond is None else max(float(free_beyond),
                                                          core_edge * 1.001)
 
@@ -105,7 +148,16 @@ def build_system(line: LineShape, N: float, chiN: float, M_core: int = 64,
     checked by the script `scripts/vlasov_check.py` of the research
     repository this package comes from (locking-kernel-universality); that
     script is not part of this package.
+
+    Since 1.7.0 refuses an emitter number N that is not finite and
+    positive (a negative one gave negative populations), a non-finite
+    chiN and a free_factor that is not finite and positive, besides the
+    checks of `class_table`.
     """
+    N = _positive_float(N, "the emitter number N")
+    if not np.isfinite(float(chiN)):
+        raise ValueError(f"chiN must be finite, got {chiN!r}")
+    free_factor = _positive_float(free_factor, "free_factor")
     scale = float(line.scale)
     free = free_factor * max(abs(float(chiN)), 2.0 * scale)
     delta, n, s_d, s_n = class_table(line, M_core, M_tail, M_spec,

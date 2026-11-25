@@ -26,7 +26,7 @@ exponent extraction possible.  Letting Omega go to zero gives the threshold
 for every kernel: the kernel enters the threshold only through its mass.
 
 THE MECHANISM.  Everything about the onset is contained in how H leaves its
-linear behaviour.  Define
+linear behavior.  Define
 
     G(Omega) = H(Omega) / Omega = int p(Omega u) W(u) du,
 
@@ -52,18 +52,21 @@ stops converging, so that the tail contribution and the curvature contribution
 exchange dominance.
 
 The value 1/2 needs a curvature term, p''(0) < 0.  On a line that is flat at
-its centre (the `box` line) G(0) - G(Omega) = p(0) int_{|u| > w/Omega} W(u) du
+its center (the `box` line) G(0) - G(Omega) = p(0) int_{|u| > w/Omega} W(u) du
 exactly, for Omega below the half width w, so a tail gives beta = 1/(s-1) for
 every s > 1 (below 1/2 once s > 3), and a compactly supported kernel gives
 G(Omega) = G(0): no power law, the order parameter jumps at the threshold.
-For p''(0) > 0 (a dip at the centre) the branch bends back.
+For p''(0) > 0 (a dip at the center) the branch bends back.  More
+generally, for p(0) - p(delta) ~ |delta|^n at the center the same argument
+gives beta = 1/(s-1) for 1 < s < n+1 and 1/n beyond (since 1.7.0
+`lockkernel.kernels.predicted_beta` takes n as `center_order`).
 
 THE CONSERVATIVE CASE.  For conservative spins W(u) = 1/(1+u^2), whence
 s = 2, m = pi and beta = 1.  Then H is a Lorentzian smoothing of the line,
 
     H(Omega) = pi Omega (p * L_Omega)(0),
 
-with L_Omega the normalised Lorentzian of half width Omega, and the linear
+with L_Omega the normalized Lorentzian of half width Omega, and the linear
 coefficient can be written in closed form,
 
     G(Omega) = pi [p(0) - c Omega + o(Omega)],
@@ -97,11 +100,23 @@ INF = mp.inf
 
 def _half_points(line: LineShape, kernel: Kernel, Omega):
     """Break points on u >= 0 for an even integrand, the start X of the tail
-    that `_even_quad` maps onto (0, 1] (None for compact support), and the
-    power k of that map.
+    that `_even_quad` maps onto (0, 1] (None for compact support), the
+    power k of that map, and the end of the part taken on a linear scale.
 
     The integrand has structure on two scales: the kernel varies on u ~ 1
     and the line on u ~ scale/Omega.  Both are given to the quadrature.
+
+    Since 1.7.0, for Omega above the line width, two more things are
+    returned for `_even_quad`: the linear part ends at u = scale/Omega
+    (one line width) and the rest is taken in log(u); and the
+    integrand is multiplied by Omega/scale.  G(Omega) falls like 1/Omega
+    there, and mpmath's quadrature stops on an ABSOLUTE error estimate,
+    so without the factor the relative error grew with Omega.  Before,
+    [10 scale/Omega, 1] was also taken on a linear scale, which across
+    many decades the quadrature could not resolve.  At 15 digits on a
+    Lorentzian line of FWHM 1 with the conservative kernel, G was 3e-10
+    (relative) off at Omega = 1e12 and 2.3 % off at 1e15.  For Omega up
+    to the line width nothing changes.
     """
     s = mp.mpf(line.scale) / Omega
     # kinks of the kernel (since 1.4.0; none for the shipped kernels)
@@ -109,17 +124,19 @@ def _half_points(line: LineShape, kernel: Kernel, Omega):
     if kernel.support is not None:
         cut = mp.mpf(kernel.support)
         kinks = {b for b in kinks if b < cut}
-        return sorted({mp.mpf(0), min(s, cut), cut} | kinks), None, 1
+        pos = sorted({mp.mpf(0), min(s, cut), cut} | kinks)
+        return (pos, None, 1, s if s < 1 and s < cut else pos[-1],
+                1 / s if s < 1 else 1)
     pos = sorted({mp.mpf(0), mp.mpf(1), mp.mpf(10), s, 10 * s} | kinks)
     k = 1 / (mp.mpf(kernel.tail) - 1) if kernel.tail is not None else 1
-    return pos, pos[-1], k
+    return pos, pos[-1], k, min(mp.mpf(1), s), (1 / s if s < 1 else 1)
 
 
-def _even_quad(f, pos, X, k=1):
+def _even_quad(f, pos, X, k=1, lin_end=1, fac=1):
     """(2 int_0^inf f(u) du, error estimate) for an even integrand f.
 
-    Three parts.  Up to u = 1 the integral is taken directly.  From u = 1
-    to X it is taken in v = log(u), because the integrand there falls or
+    Three parts.  Up to u = lin_end the integral is taken directly.  From
+    there to X it is taken in v = log(u), because the integrand there falls or
     rises like a power of u across many decades: on a linear scale the
     quadrature cannot resolve the start of a segment such as
     [10, 10^12], and before 1.2.0 this left G(Omega) about 4e-10 off at
@@ -128,17 +145,26 @@ def _even_quad(f, pos, X, k=1):
     f ~ u^(-s) becomes a constant at t -> 0.  (mpmath's own treatment of
     [X, inf) with X large is good only to about 1e-9 relative at 15
     digits.)  `pos` lists the break points on u >= 0; for compact support
-    (X None) they are all integrated directly.
+    (X None) they are integrated directly up to lin_end and in log(u)
+    beyond.  lin_end is 1 (or the support edge) unless Omega is above the
+    line width; then the integrand is also multiplied by `fac` and the
+    result divided by it, so that it is of order one (see `_half_points`).
     """
-    if X is None:
-        return tuple(2 * x for x in mp.quad(f, pos, error=True))
-    lin = [p for p in pos if p <= 1]
-    logs = [mp.log(p) for p in pos if p >= 1]
+    if fac != 1:
+        g = f
+        f = lambda u: fac * g(u)
+    lin = [p for p in pos if p <= lin_end]
+    logs = [mp.log(p) for p in pos if p >= lin_end]
     v, e = mp.quad(f, lin, error=True)
-    v1, e1 = mp.quad(lambda w: f(mp.exp(w)) * mp.exp(w), logs, error=True)
+    if len(logs) > 1:
+        v1, e1 = mp.quad(lambda w: f(mp.exp(w)) * mp.exp(w), logs,
+                         error=True)
+        v, e = v + v1, e + e1
+    if X is None:
+        return 2 * v / fac, 2 * e / fac
     v2, e2 = mp.quad(lambda t: f(X * t ** -k) * k * X * t ** (-k - 1),
                      [0, 1], error=True)
-    return 2 * (v + v1 + v2), 2 * (e + e1 + e2)
+    return 2 * (v + v2) / fac, 2 * (e + e2) / fac
 
 
 def _check_omega(Omega, zero_ok: bool = False) -> mp.mpf:
@@ -214,7 +240,7 @@ def _G0_minus_G(line: LineShape, kernel: Kernel, Omega) -> mp.mpf:
     as chiN/chiN_c - 1 subtracts two nearly equal numbers and loses
     about log10(1/eps) digits; integrating the difference directly does
     not.  Two details keep the digits.  p(0) - p(Omega u) itself cancels
-    near the centre of the line, by about 2 log10(scale/Omega) digits, so
+    near the center of the line, by about 2 log10(scale/Omega) digits, so
     it is formed with that many guard digits.  And mpmath's quadrature
     stops on an ABSOLUTE error estimate, which a small D meets too early,
     so the integral is done twice, the second time with the integrand
@@ -322,24 +348,34 @@ def c_coefficient(line: LineShape) -> mp.mpf:
 
     Near the lower end of the range, p(delta) - p(0) is a cancellation that
     loses about 40 digits, so the quadrature runs with 25 digits more than
-    the working precision and the lower end is placed at 1e-20 line widths.
-    Without this the result was wrong at mpmath's default precision (15
-    digits): `amplitude(lorentzian())` came out near 5e-4 instead of 1.
-    Skipping the first 1e-20 line widths leaves out a piece of relative
-    size about 1e-20, so the result is good to about 20 significant digits
-    at most, however high the working precision is set.
+    the working precision and the lower end is placed at a = 1e-20 line
+    widths.  Without this the result was wrong at mpmath's default precision
+    (15 digits): `amplitude(lorentzian())` came out near 5e-4 instead of 1.
+
+    The piece from 0 to a is added in closed form (since 1.7.0): there the
+    integrand is p''(0)/2 + O(delta^2), so the piece is p''(0) a / 2 per
+    side, with an error of relative size about a^2 = 1e-40 of it, so
+    about 1e-60 of c.  Before 1.7.0 the piece was left out, which limited c
+    to about 20 significant digits however high the working precision was
+    set: at 40 digits `amplitude(lorentzian())` was 1 + 1.3e-20 instead of
+    1.  p''(0) is taken by mpmath's numerical differentiation; on a line
+    with compact support (`box`) it is zero.
     """
     with mp.extradps(25):
         p0 = line.p0()
         sc = mp.mpf(line.scale)
+        a = sc * mp.mpf(10) ** -20
 
         def f(d):
             if d == 0:
                 return mp.diff(line.pdf, mp.mpf(0), 2) / 2
             return (line.pdf(d) - p0) / d ** 2
 
-        val = 2 * mp.quad(f, [sc * mp.mpf(10) ** -20, sc * mp.mpf("1e-3"), sc,
+        val = 2 * mp.quad(f, [a, sc * mp.mpf("1e-3"), sc,
                               10 * sc, 100 * sc, INF])
+        # the piece 0 < |delta| < a, where f = p''(0)/2 to O(a^2)
+        if line.compact_support is None or a < line.compact_support:
+            val += mp.diff(line.pdf, mp.mpf(0), 2) * a
         out = -val / mp.pi
     return +out
 
@@ -461,6 +497,15 @@ def amplitude_general(line: LineShape, kernel: Kernel, C=None) -> mp.mpf:
     linear.  `C` defaults to the tail amplitude measured from the kernel
     itself, W(v) v^s at v = 10^6, which is one for the family 1/(1+|u|^s).
 
+    Since 1.7.0 a kernel that knows its exact tail amplitude
+    (`Kernel.tail_amplitude`) gives it instead: `conservative` and
+    `power_tail` (C = 1) and the coupling averages of `heterogeneous`.
+    Before, the value at 10^6 was used, which for `power_tail(s)` is low by
+    a relative 10^(-6 s), and the power 1/(s-1) multiplies that (2.5e-6 in
+    A for s = 1.1); and a coupling average whose tail is approached slowly,
+    such as `heterogeneous(conservative(), 3.8)`, was refused below unless
+    C was passed.
+
     Since 1.3.0 that default is checked: W(v) v^s is also evaluated at
     v = 10^9, and if the two differ by more than a relative 1e-6 the tail
     has not reached its asymptotic power law at v = 10^6 and the call is
@@ -488,7 +533,9 @@ def amplitude_general(line: LineShape, kernel: Kernel, C=None) -> mp.mpf:
             f"1 < s < 3 (kernel {kernel.name!r} has tail {kernel.tail}); "
             "use amplitude_curvature for the beta = 1/2 class")
     s = mp.mpf(kernel.tail)
-    if C is None:
+    if C is None and getattr(kernel, "tail_amplitude", None) is not None:
+        C = kernel.tail_amplitude()          # exact (since 1.7.0)
+    elif C is None:
         v = mp.mpf(10) ** 6
         C = kernel.W(v) * v ** s
         v2 = mp.mpf(10) ** 9
@@ -499,7 +546,7 @@ def amplitude_general(line: LineShape, kernel: Kernel, C=None) -> mp.mpf:
                 f"converged: W(v) v^s = {mp.nstr(C, 8)} at v = 1e6 but "
                 f"{mp.nstr(C2, 8)} at v = 1e9 (s = {kernel.tail:g}). Pass "
                 "the asymptotic tail amplitude C explicitly")
-    elif not (mp.isfinite(mp.mpf(C)) and mp.mpf(C) > 0):
+    if not (mp.isfinite(mp.mpf(C)) and mp.mpf(C) > 0):
         raise ValueError(f"the tail amplitude C must be positive, got {C}")
     I_s = tail_integral(line, s)
     if not I_s > 0:
@@ -519,7 +566,7 @@ def amplitude_curvature(line: LineShape, kernel: Kernel) -> mp.mpf:
 
     That class is every kernel with compact support (Kuramoto), faster
     than algebraic decay (Gaussian), or a tail s > 3, on a line with a
-    rounded maximum at its centre, p''(0) < 0.  There the first
+    rounded maximum at its center, p''(0) < 0.  There the first
     correction to G(0) = p(0) m is set by the curvature of the line,
 
         G(Omega) = G(0) + (1/2) p''(0) M_2 Omega^2 + ...,
@@ -538,7 +585,7 @@ def amplitude_curvature(line: LineShape, kernel: Kernel) -> mp.mpf:
     Refuses a kernel with tail s <= 3 (M_2 diverges; use `amplitude` or
     `amplitude_general`) and a line with p''(0) >= 0: at p''(0) = 0 (a
     flat top, such as `box`) there is no curvature term, and at
-    p''(0) > 0 (a dip at the centre) the branch bends back and the onset
+    p''(0) > 0 (a dip at the center) the branch bends back and the onset
     is first order.  p''(0) is taken by mpmath's numerical
     differentiation.
 
@@ -560,7 +607,7 @@ def amplitude_curvature(line: LineShape, kernel: Kernel) -> mp.mpf:
         raise ValueError(
             f"p''(0) = {mp.nstr(pp, 5)} is not negative (or is zero to the "
             "working precision): the line has no "
-            "rounded maximum at its centre, so the onset is not of the "
+            "rounded maximum at its center, so the onset is not of the "
             "form R = A eps^(1/2) (flat top: no curvature term; dip: the "
             "branch bends back and the onset is first order)")
     G0 = line.p0() * kernel.mass()

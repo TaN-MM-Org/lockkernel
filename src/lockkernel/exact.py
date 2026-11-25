@@ -49,7 +49,24 @@ def symmetric_exact(N: int, chiN: float, times: ArrayLike):
     any emitter number.
 
     Returns (contrast, xi2), each an array over `times`.
+
+    Since 1.7.0 refuses an N that is not a whole number >= 1 (N = 2.5 gave
+    a contrast of 1.015, above its maximum of 1, and N = 0 raised
+    ZeroDivisionError) and a non-finite chiN or time.
     """
+    try:
+        whole = (isinstance(N, (int, float, np.integer, np.floating))
+                 and not isinstance(N, bool) and float(N) == int(N)
+                 and int(N) >= 1)
+    except (ValueError, OverflowError):        # NaN, infinity
+        whole = False
+    if not whole:
+        raise ValueError(f"N must be a whole number of emitters >= 1, "
+                         f"got {N!r}")
+    N = int(N)
+    times = np.atleast_1d(np.asarray(times, float))
+    if not np.isfinite(float(chiN)) or np.any(~np.isfinite(times)):
+        raise ValueError("chiN and the times must be finite")
     S = N / 2.0
     m = np.arange(-S, S + 1)                      # S_z eigenvalues
     chi1 = chiN / N
@@ -62,7 +79,7 @@ def symmetric_exact(N: int, chiN: float, times: ArrayLike):
 
     sp = np.sqrt(S * (S + 1) - m[:-1] * (m[:-1] + 1))   # <m+1|S+|m>
     contrast, xi2 = [], []
-    for t in np.atleast_1d(times):
+    for t in times:
         psi = amp * np.exp(-1j * E * t)
         # <S+> = sum_m conj(psi_{m+1}) sp_m psi_m
         Sp = np.sum(np.conj(psi[1:]) * sp * psi[:-1])
@@ -81,7 +98,7 @@ def symmetric_exact(N: int, chiN: float, times: ArrayLike):
         Sy = Sp.imag
         Sxx = 0.5 * (Spp.real + Spm.real)          # (S+^2 + S-^2 + S+S- + S-S+)/4
         Syy = 0.5 * (-Spp.real + Spm.real)
-        Sxy = 0.5 * Spp.imag                       # symmetrised
+        Sxy = 0.5 * Spp.imag                       # symmetrized
         Sxz = 0.5 * (SzSp + SpSz).real
         Syz = 0.5 * (SzSp + SpSz).imag
         J = np.array([Sx, Sy, Sz.real])
